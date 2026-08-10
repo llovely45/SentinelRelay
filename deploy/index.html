@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>SentinelRelay 部署向导</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1220;
+      --panel: #121c2e;
+      --panel-strong: #18243a;
+      --text: #edf4ff;
+      --muted: #a7b7cf;
+      --line: #2a3a56;
+      --accent: #58a6ff;
+      --accent-strong: #2f81f7;
+      --success: #54d28a;
+      --danger: #ff8b8b;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(47, 129, 247, .22), transparent 35rem),
+        radial-gradient(circle at 90% 15%, rgba(84, 210, 138, .12), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(960px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 42px 0 72px;
+    }
+
+    header { margin-bottom: 28px; }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 10px; font-size: clamp(2rem, 4vw, 3rem); line-height: 1.12; }
+    h2 { margin-bottom: 8px; font-size: 1.25rem; }
+    header p { max-width: 720px; color: var(--muted); }
+
+    .card {
+      margin: 18px 0;
+      padding: clamp(18px, 4vw, 30px);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(18, 28, 46, .9);
+      box-shadow: var(--shadow);
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .field { min-width: 0; }
+    .field.wide { grid-column: 1 / -1; }
+    label { display: block; margin-bottom: 7px; font-weight: 650; }
+    label small { display: block; margin-top: 2px; color: var(--muted); font-size: .82rem; font-weight: 400; }
+
+    input, textarea, button {
+      font: inherit;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0d1728;
+      color: var(--text);
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    input { min-height: 46px; padding: 10px 12px; }
+    textarea { min-height: 300px; padding: 14px; resize: vertical; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    input:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(88, 166, 255, .18); }
+    input::placeholder { color: #7284a1; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+    button {
+      min-height: 44px;
+      padding: 9px 17px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      cursor: pointer;
+      color: #fff;
+      background: var(--accent-strong);
+      font-weight: 700;
+      transition: filter .15s ease, opacity .15s ease;
+    }
+    button:hover:not(:disabled) { filter: brightness(1.1); }
+    button:disabled { cursor: wait; opacity: .58; }
+    button.secondary { border-color: var(--line); background: transparent; color: var(--text); }
+    button.danger { border-color: rgba(255, 139, 139, .45); background: transparent; color: var(--danger); }
+
+    .status {
+      min-height: 24px;
+      margin-top: 18px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .status.success { color: var(--success); }
+    .status.error { color: var(--danger); }
+    .status.busy { color: var(--accent); }
+
+    .result-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .result-header p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .result-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .privacy-note { margin: 16px 0 0; color: var(--muted); font-size: .88rem; }
+    .privacy-note strong { color: var(--text); }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: rgba(3, 8, 17, .72);
+    }
+    .modal-backdrop[hidden], [hidden] { display: none !important; }
+    .modal {
+      width: min(480px, 100%);
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+    }
+    .modal h2 { margin-bottom: 10px; }
+    .modal p { color: var(--muted); }
+    .modal .actions { margin-top: 22px; }
+    .spinner {
+      width: 22px;
+      height: 22px;
+      margin-bottom: 16px;
+      border: 3px solid rgba(167, 183, 207, .28);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 680px) {
+      main { width: min(100% - 22px, 560px); padding-top: 26px; }
+      .field-grid { grid-template-columns: 1fr; gap: 15px; }
+      .field.wide { grid-column: auto; }
+      .actions, .actions button { width: 100%; }
+      .result-header { display: block; }
+      .result-header p { margin-top: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">SentinelRelay · Cloudflare Worker</p>
+      <h1>部署向导</h1>
+      <p>在浏览器中校验 Telegram 配置，并生成可直接粘贴到 Cloudflare Workers 的单文件 Worker。密钥只在当前页面内存中处理，不会上传、下载或写入浏览器存储。</p>
+    </header>
+
+    <form id="config-form" class="card" novalidate>
+      <h2>1. 填写运行配置</h2>
+      <p class="privacy-note">带 <strong>*</strong> 的项目必填。Telegram Bot Token、Turnstile Secret 和 Webhook Secret 使用密码输入框；生成后请把它们视为已暴露，必要时立即轮换。</p>
+
+      <div class="field-grid">
+        <div class="field wide">
+          <label for="TG_BOT_TOKEN">Telegram Bot Token *</label>
+          <input id="TG_BOT_TOKEN" name="TG_BOT_TOKEN" type="password" autocomplete="new-password" spellcheck="false" required placeholder="例如 123456789:AA...">
+        </div>
+
+        <div class="field">
+          <label for="TG_GROUP_ID">目标群组 ID *</label>
+          <input id="TG_GROUP_ID" name="TG_GROUP_ID" type="text" inputmode="numeric" autocomplete="off" required placeholder="例如 -1001234567890">
+          <small>必须是开启 Topics 的 Telegram 超级群。</small>
+        </div>
+
+        <div class="field">
+          <label for="APP_BASE_URL">Worker HTTPS 地址 *</label>
+          <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com">
+          <small>不要添加末尾斜杠。</small>
+        </div>
+
+        <div class="field">
+          <label for="TURNSTILE_SITE_KEY">Turnstile Site Key *</label>
+          <input id="TURNSTILE_SITE_KEY" name="TURNSTILE_SITE_KEY" type="text" autocomplete="off" spellcheck="false" required>
+        </div>
+
+        <div class="field">
+          <label for="TURNSTILE_SECRET_KEY">Turnstile Secret Key *</label>
+          <input id="TURNSTILE_SECRET_KEY" name="TURNSTILE_SECRET_KEY" type="password" autocomplete="new-password" spellcheck="false" required>
+        </div>
+
+        <div class="field wide">
+          <label for="TG_WEBHOOK_SECRET">Telegram Webhook Secret *</label>
+          <input id="TG_WEBHOOK_SECRET" name="TG_WEBHOOK_SECRET" type="password" autocomplete="new-password" spellcheck="false" required>
+          <small>至少 16 个字符；Telegram 会通过请求头发送它。</small>
+        </div>
+
+        <div class="field">
+          <label for="VERIFICATION_TTL_MINUTES">验证有效期（分钟） *</label>
+          <input id="VERIFICATION_TTL_MINUTES" name="VERIFICATION_TTL_MINUTES" type="number" min="5" max="1440" step="1" value="30" required>
+        </div>
+
+        <div class="field">
+          <label for="STUN_SERVER_URL">STUN URL *</label>
+          <input id="STUN_SERVER_URL" name="STUN_SERVER_URL" type="text" autocomplete="off" spellcheck="false" value="stun:stun.miwifi.com:3478" required>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="validate-button" type="button">API 验证</button>
+        <button id="generate-button" class="secondary" type="button">生成代码</button>
+      </div>
+      <div id="form-status" class="status" role="status" aria-live="polite"></div>
+    </form>
+
+    <section id="result-panel" class="card" hidden aria-labelledby="result-title">
+      <div class="result-header">
+        <div>
+          <h2 id="result-title">2. 复制 Worker 代码</h2>
+          <p>代码只保留在当前页面内存中；关闭或刷新页面后会被清空。</p>
+        </div>
+      </div>
+      <textarea id="generated-code" readonly spellcheck="false" aria-label="生成的 Worker 完整代码"></textarea>
+      <div class="result-actions">
+        <button id="copy-generated" type="button">复制完整代码</button>
+        <button id="clear-result" class="danger" type="button">清空结果</button>
+      </div>
+      <div id="copy-status" class="status" role="status" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <div id="star-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="star-title" aria-describedby="star-message">
+    <section class="modal">
+      <div id="star-spinner" class="spinner" aria-hidden="true"></div>
+      <h2 id="star-title">先完成一个小提醒</h2>
+      <p id="star-message">需要先给 SentinelRelay 仓库点击 Star，才能进行 API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。</p>
+      <div id="star-actions" class="actions"></div>
+    </section>
+  </div>
+
+  <script type="module">
+    import { replaceWorkerPlaceholders, validateDeployConfig } from "./generator.js";
+    import { getStarGateState, markStarRedirect, setPendingAction } from "./gate.js";
+
+    const STAR_KEY = "sentinelrelay_star_redirected_v1";
+    const PENDING_KEY = "sentinelrelay_pending_action_v1";
+    const REPOSITORY_URL = "https://github.com/llovely45/SentinelRelay";
+    const GATE_DELAY_MS = 1000;
+
+    const form = document.getElementById("config-form");
+    const validateButton = document.getElementById("validate-button");
+    const generateButton = document.getElementById("generate-button");
+    const formStatus = document.getElementById("form-status");
+    const resultPanel = document.getElementById("result-panel");
+    const generatedCode = document.getElementById("generated-code");
+    const copyButton = document.getElementById("copy-generated");
+    const clearButton = document.getElementById("clear-result");
+    const copyStatus = document.getElementById("copy-status");
+    const starModal = document.getElementById("star-modal");
+    const starSpinner = document.getElementById("star-spinner");
+    const starMessage = document.getElementById("star-message");
+    const starActions = document.getElementById("star-actions");
+
+    function browserStorage() {
+      try {
+        return window.localStorage;
+      } catch {
+        return null;
+      }
+    }
+
+    function setStatus(element, message, tone = "") {
+      element.textContent = message;
+      element.className = tone ? `status ${tone}` : "status";
+    }
+
+    function setBusy(isBusy) {
+      validateButton.disabled = isBusy;
+      generateButton.disabled = isBusy;
+      if (isBusy) {
+        validateButton.setAttribute("aria-busy", "true");
+        generateButton.setAttribute("aria-busy", "true");
+      } else {
+        validateButton.removeAttribute("aria-busy");
+        generateButton.removeAttribute("aria-busy");
+      }
+    }
+
+    function readValues() {
+      return Object.fromEntries(new FormData(form).entries());
+    }
+
+    function renderConfigErrors(errors) {
+      setStatus(formStatus, errors.length ? `请检查以下项目：\n${errors.map((error) => `• ${error}`).join("\n")}` : "", errors.length ? "error" : "");
+    }
+
+    function telegramError(body, token, fallback) {
+      const description = body && typeof body === "object" ? body.description : "";
+      const message = String(description || fallback || "Telegram API 请求失败")
+        .replaceAll(String(token || ""), "[已隐藏]")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+      return message.slice(0, 220) || "Telegram API 请求失败";
+    }
+
+    /**
+     * Validate the bot and target group directly against Telegram's Bot API.
+     * The token is needed in the API path, but it is never put in a query
+     * parameter, logged, or returned as part of an error.
+     */
+    async function runTelegramValidation(values) {
+      const token = String(values?.TG_BOT_TOKEN || "").trim();
+      const groupId = String(values?.TG_GROUP_ID || "").trim();
+      if (!token || !groupId) return { ok: false, error: "请先填写 Bot Token 和群组 ID" };
+
+      async function call(method, payload = {}) {
+        let response;
+        try {
+          response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+        } catch {
+          throw new Error("无法连接 Telegram API，请检查网络后重试");
+        }
+
+        let body;
+        try {
+          body = await response.json();
+        } catch {
+          throw new Error("Telegram API 返回了无法解析的响应");
+        }
+        if (!response.ok || !body?.ok) {
+          throw new Error(telegramError(body, token, `Telegram API HTTP ${response.status}`));
+        }
+        return body.result;
+      }
+
+      let bot;
+      let chat;
+      try {
+        bot = await call("getMe");
+        chat = await call("getChat", { chat_id: groupId });
+      } catch (error) {
+        return { ok: false, bot, chat, error: error?.message || "Telegram API 验证失败" };
+      }
+
+      if (!bot || bot.is_bot === false) {
+        return { ok: false, bot, chat, error: "Bot Token 验证失败" };
+      }
+      if (!chat || chat.type !== "supergroup") {
+        return { ok: false, bot, chat, error: "目标群组必须是 Telegram 超级群，并开启 Topics" };
+      }
+      if (chat.is_forum === false) {
+        return { ok: false, bot, chat, error: "目标超级群尚未开启 Topics（Forum）" };
+      }
+      return { ok: true, bot, chat };
+    }
+
+    /** Copy generated source without putting it in localStorage or a URL. */
+    async function copyGeneratedWorker(code) {
+      const source = String(code ?? "");
+      if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        try {
+          await navigator.clipboard.writeText(source);
+          return "clipboard";
+        } catch {
+          // Fall through to the old selection-based browser API.
+        }
+      }
+
+      const existing = document.getElementById("generated-code");
+      let target = existing;
+      let temporary = false;
+      if (!target) {
+        target = document.createElement("textarea");
+        target.value = source;
+        target.readOnly = true;
+        target.setAttribute("aria-hidden", "true");
+        target.style.position = "fixed";
+        target.style.left = "-9999px";
+        document.body.appendChild(target);
+        temporary = true;
+      }
+      target.focus();
+      target.select();
+      target.setSelectionRange(0, target.value.length);
+      try {
+        if (typeof document.execCommand === "function") document.execCommand("copy");
+      } catch {
+        // Selection is intentionally left available for manual copy.
+      }
+      if (temporary) target.remove();
+      return "fallback";
+    }
+
+    function closeStarGate() {
+      starModal.hidden = true;
+      starActions.replaceChildren();
+      starSpinner.hidden = false;
+    }
+
+    /**
+     * Resolve one protected action after the local Star reminder. No config
+     * value is saved; only the non-secret action name and redirect marker use
+     * localStorage through the tested gate module.
+     */
+    function requestStarGate(action) {
+      const storage = browserStorage();
+      setPendingAction(storage, PENDING_KEY, action);
+      const state = getStarGateState(storage, STAR_KEY);
+      starModal.hidden = false;
+      starSpinner.hidden = false;
+      starMessage.textContent = state === "new"
+        ? "需要先给 SentinelRelay 仓库点击 Star，才能进行 API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。"
+        : "我们记录到你之前已经打开过仓库。点击“我已验证”后，只放行本次操作；这里不会向 GitHub 查询真实 Star 状态。";
+      starActions.replaceChildren();
+
+      return new Promise((resolve) => {
+        window.setTimeout(() => {
+          starSpinner.hidden = true;
+          const actionButton = document.createElement("button");
+          actionButton.type = "button";
+          if (state === "new") {
+            actionButton.textContent = "立即跳转仓库";
+            actionButton.addEventListener("click", () => {
+              // The marker must be written before opening a new tab.
+              markStarRedirect(storage, STAR_KEY, REPOSITORY_URL, Date.now());
+              if (typeof window.open === "function") {
+                window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
+              } else {
+                window.location.assign(REPOSITORY_URL);
+              }
+              closeStarGate();
+              // The first redirect only records the reminder. The protected
+              // action stays blocked until a later click confirms “我已验证”.
+              resolve(false);
+            }, { once: true });
+          } else {
+            actionButton.textContent = "我已验证";
+            actionButton.addEventListener("click", () => {
+              closeStarGate();
+              resolve(true);
+            }, { once: true });
+          }
+          starActions.append(actionButton);
+          actionButton.focus();
+        }, GATE_DELAY_MS);
+      });
+    }
+
+    async function validateValues(values) {
+      const config = validateDeployConfig(values);
+      if (!config.ok) {
+        renderConfigErrors(config.errors);
+        return null;
+      }
+      setStatus(formStatus, "正在向 Telegram 请求 getMe 和 getChat…", "busy");
+      const telegram = await runTelegramValidation(values);
+      if (!telegram.ok) {
+        setStatus(formStatus, `Telegram 验证失败：${telegram.error || "未知错误"}`, "error");
+        return null;
+      }
+      const botName = telegram.bot?.username ? `@${telegram.bot.username}` : telegram.bot?.first_name || "当前 Bot";
+      const chatName = telegram.chat?.title || telegram.chat?.username || String(values.TG_GROUP_ID);
+      setStatus(formStatus, `API 验证成功：${botName} · ${chatName}`, "success");
+      return telegram;
+    }
+
+    async function handleValidation() {
+      if (!(await requestStarGate("validate"))) return;
+      setBusy(true);
+      try {
+        await validateValues(readValues());
+      } catch {
+        setStatus(formStatus, "验证失败，请稍后重试。", "error");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function handleGeneration() {
+      if (!(await requestStarGate("generate"))) return;
+      setBusy(true);
+      resultPanel.hidden = true;
+      generatedCode.value = "";
+      copyStatus.textContent = "";
+      const values = readValues();
+      try {
+        const telegram = await validateValues(values);
+        if (!telegram) return;
+
+        setStatus(formStatus, "正在读取同源 Worker 模板…", "busy");
+        const response = await fetch("../worker/worker.js", {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "text/javascript" }
+        });
+        if (!response.ok) throw new Error(`Worker 模板读取失败（HTTP ${response.status}）`);
+        const template = await response.text();
+        const code = replaceWorkerPlaceholders(template, values);
+        generatedCode.value = code;
+        resultPanel.hidden = false;
+        setStatus(formStatus, "代码生成成功。请先在 Cloudflare 创建 D1（绑定名 DB），再粘贴并部署代码。", "success");
+        resultPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (error) {
+        resultPanel.hidden = true;
+        generatedCode.value = "";
+        setStatus(formStatus, error?.message || "生成失败，请稍后重试。", "error");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    validateButton.addEventListener("click", handleValidation);
+    generateButton.addEventListener("click", handleGeneration);
+
+    copyButton.addEventListener("click", async () => {
+      if (!generatedCode.value) return;
+      copyButton.disabled = true;
+      try {
+        const mode = await copyGeneratedWorker(generatedCode.value);
+        setStatus(copyStatus, mode === "clipboard"
+          ? "已复制到剪贴板。"
+          : "浏览器未授权自动复制，代码已选中，请按 Ctrl/Cmd+C 完成复制。", "success");
+      } catch {
+        setStatus(copyStatus, "自动复制不可用，请手动选中代码复制。", "error");
+      } finally {
+        copyButton.disabled = false;
+      }
+    });
+
+    clearButton.addEventListener("click", () => {
+      generatedCode.value = "";
+      copyStatus.textContent = "";
+      resultPanel.hidden = true;
+      setStatus(formStatus, "已清空页面内存中的生成结果。", "");
+    });
+
+    // Expose only non-persistent helpers for browser smoke tests and embeds.
+    window.runTelegramValidation = runTelegramValidation;
+    window.copyGeneratedWorker = copyGeneratedWorker;
+  </script>
+</body>
+</html>
