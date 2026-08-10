@@ -4,9 +4,8 @@ SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信
 
 ## 目录
 
-- `index.html`、`_headers`：Cloudflare Pages 静态入口和安全响应头。
-- `worker/worker.js`：可直接粘贴到 Cloudflare Workers 的单文件模块 Worker 模板。模板中的配置占位符由部署页替换，D1 表结构会在第一次请求时自动建立。
 - `deploy/index.html`：完全静态的浏览器配置与代码生成页。
+- `deploy/worker.js`：部署向导同源读取的单文件 Worker 模板。模板中的配置占位符由部署页替换，D1 表结构会在第一次请求时自动建立。
 - `deploy/generator.js`、`deploy/gate.js`：部署页使用的纯配置替换和本地 Star 提醒逻辑。
 - `deploy/README.md`：部署向导的详细准备事项和安全说明。
 
@@ -17,9 +16,9 @@ Pages 只托管静态部署向导，不部署 Telegram Worker。Cloudflare 控�
 - 生产分支：`main`
 - Framework preset：`None`
 - Build command：留空
-- Build output directory：`.`
+- Build output directory：`deploy`
 
-保存并部署后，Pages 根地址会自动跳转到 `/deploy/index.html`。部署向导会从同源 `/worker/worker.js` 读取模板，配置验证和最终代码生成都在浏览器内完成。
+保存并部署后，Pages 根地址直接打开 `deploy/index.html` 的内容。部署向导会从同源 `./worker.js` 读取模板，配置验证和最终代码生成都在浏览器内完成。
 
 Pages 部署完成后仍需按照下面的 Worker 教程，把生成代码单独部署到 Cloudflare Workers，并绑定 D1 `DB`；Pages 不承载 Telegram Webhook，也不需要 Pages Functions。
 
@@ -55,7 +54,9 @@ Pages 部署完成后仍需按照下面的 Worker 教程，把生成代码单独
 | `VERIFICATION_TTL_MINUTES` | 验证会话有效期，必须是 5–1440 的整数。 |
 | `STUN_SERVER_URL` | 浏览器 WebRTC ICE 探测地址，必须以 `stun:` 开头。 |
 
-生成器只替换 `worker/worker.js` 中的 quoted markers，并使用 JSON 转义；没有填写完整配置时不会生成代码。请在 Telegram/Cloudflare 控制台轮换已经出现在日志、截图或公共剪贴板中的 Token/Secret。
+生成器只替换 `deploy/worker.js` 中的 quoted markers，并使用 JSON 转义；没有填写完整配置时不会生成代码。请在 Telegram/Cloudflare 控制台轮换已经出现在日志、截图或公共剪贴板中的 Token/Secret。
+
+部署页的每个输入框都提供填写教程和独立验证按钮；Bot Token/群组 ID 会调用 Telegram API，其余字段执行格式或范围检查。所有验证按钮、API 验证和生成代码按钮共用同一套 Star 提醒门禁。
 
 ## 验证、指纹与隐私
 

@@ -17,7 +17,7 @@ export const DEPLOY_MARKERS = Object.freeze([
 const MARKER_SET = new Set(DEPLOY_MARKERS);
 const QUOTED_MARKER_RE = /(["'])__(TG_BOT_TOKEN|TG_GROUP_ID|APP_BASE_URL|TURNSTILE_SITE_KEY|TURNSTILE_SECRET_KEY|TG_WEBHOOK_SECRET|VERIFICATION_TTL_MINUTES|STUN_SERVER_URL)__\1/g;
 
-const CONFIG_ERRORS = Object.freeze({
+export const CONFIG_ERRORS = Object.freeze({
   TG_BOT_TOKEN: "TG_BOT_TOKEN 格式或长度无效",
   TG_GROUP_ID: "TG_GROUP_ID 必须是数字",
   APP_BASE_URL: "APP_BASE_URL 必须使用 HTTPS 且不能带末尾斜杠",
@@ -66,6 +66,40 @@ function isIntegerInRange(value, min, max) {
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max;
 }
 
+function isNumericGroupId(value) {
+  return typeof value === "number"
+    ? Number.isSafeInteger(value)
+    : typeof value === "string" && /^-?\d+$/.test(value);
+}
+
+/** Validate one visible configuration field and return its user-facing error. */
+export function validateDeployField(name, value) {
+  switch (name) {
+    case "TG_BOT_TOKEN":
+      return isTelegramToken(value) ? "" : CONFIG_ERRORS.TG_BOT_TOKEN;
+    case "TG_GROUP_ID":
+      return isNumericGroupId(value) ? "" : CONFIG_ERRORS.TG_GROUP_ID;
+    case "APP_BASE_URL":
+      return isHttpsUrlWithoutTrailingSlash(value) ? "" : CONFIG_ERRORS.APP_BASE_URL;
+    case "TURNSTILE_SITE_KEY":
+      return isNonEmptyString(value) ? "" : CONFIG_ERRORS.TURNSTILE_SITE_KEY;
+    case "TURNSTILE_SECRET_KEY":
+      return isNonEmptyString(value) ? "" : CONFIG_ERRORS.TURNSTILE_SECRET_KEY;
+    case "TG_WEBHOOK_SECRET":
+      return typeof value === "string" && /^[A-Za-z0-9_-]{16,256}$/.test(value)
+        ? ""
+        : CONFIG_ERRORS.TG_WEBHOOK_SECRET;
+    case "VERIFICATION_TTL_MINUTES":
+      return isIntegerInRange(value, 5, 1440) ? "" : CONFIG_ERRORS.VERIFICATION_TTL_MINUTES;
+    case "STUN_SERVER_URL":
+      return typeof value === "string" && value.startsWith("stun:")
+        ? ""
+        : CONFIG_ERRORS.STUN_SERVER_URL;
+    default:
+      return "";
+  }
+}
+
 /**
  * Validate values collected by the static deployment page.
  *
@@ -74,40 +108,9 @@ function isIntegerInRange(value, min, max) {
  */
 export function validateDeployConfig(values = {}) {
   const input = values && typeof values === "object" ? values : {};
-  const errors = [];
-
-  if (!isTelegramToken(input.TG_BOT_TOKEN)) errors.push(CONFIG_ERRORS.TG_BOT_TOKEN);
-
-  const groupId = input.TG_GROUP_ID;
-  const isNumericGroup = typeof groupId === "number"
-    ? Number.isSafeInteger(groupId)
-    : typeof groupId === "string" && /^-?\d+$/.test(groupId);
-  if (!isNumericGroup) errors.push(CONFIG_ERRORS.TG_GROUP_ID);
-
-  if (!isHttpsUrlWithoutTrailingSlash(input.APP_BASE_URL)) {
-    errors.push(CONFIG_ERRORS.APP_BASE_URL);
-  }
-
-  if (!isNonEmptyString(input.TURNSTILE_SITE_KEY)) {
-    errors.push(CONFIG_ERRORS.TURNSTILE_SITE_KEY);
-  }
-
-  if (!isNonEmptyString(input.TURNSTILE_SECRET_KEY)) {
-    errors.push(CONFIG_ERRORS.TURNSTILE_SECRET_KEY);
-  }
-
-  if (typeof input.TG_WEBHOOK_SECRET !== "string"
-    || !/^[A-Za-z0-9_-]{16,256}$/.test(input.TG_WEBHOOK_SECRET)) {
-    errors.push(CONFIG_ERRORS.TG_WEBHOOK_SECRET);
-  }
-
-  if (!isIntegerInRange(input.VERIFICATION_TTL_MINUTES, 5, 1440)) {
-    errors.push(CONFIG_ERRORS.VERIFICATION_TTL_MINUTES);
-  }
-
-  if (typeof input.STUN_SERVER_URL !== "string" || !input.STUN_SERVER_URL.startsWith("stun:")) {
-    errors.push(CONFIG_ERRORS.STUN_SERVER_URL);
-  }
+  const errors = DEPLOY_MARKERS
+    .map((name) => validateDeployField(name, input[name]))
+    .filter(Boolean);
 
   return { ok: errors.length === 0, errors };
 }

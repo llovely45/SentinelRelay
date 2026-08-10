@@ -76,6 +76,13 @@
     .field.wide { grid-column: 1 / -1; }
     label { display: block; margin-bottom: 7px; font-weight: 650; }
     label small { display: block; margin-top: 2px; color: var(--muted); font-size: .82rem; font-weight: 400; }
+    .field-controls { display: flex; align-items: stretch; gap: 8px; }
+    .field-controls input { min-width: 0; }
+    .field-check { flex: 0 0 auto; min-height: 42px; padding: 7px 12px; border-color: var(--line); background: transparent; color: var(--text); font-size: .86rem; }
+    .field-check:hover:not(:disabled) { background: rgba(88, 166, 255, .12); }
+    .field-help { display: block; margin: 7px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+    .field-error { min-height: 1.35em; margin: 4px 0 0; color: var(--danger); font-size: .82rem; }
+    .field input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(255, 139, 139, .12); }
 
     input, textarea, button {
       font: inherit;
@@ -185,45 +192,82 @@
       <div class="field-grid">
         <div class="field wide">
           <label for="TG_BOT_TOKEN">Telegram Bot Token *</label>
-          <input id="TG_BOT_TOKEN" name="TG_BOT_TOKEN" type="password" autocomplete="new-password" spellcheck="false" required placeholder="例如 123456789:AA...">
+          <div class="field-controls">
+            <input id="TG_BOT_TOKEN" name="TG_BOT_TOKEN" type="password" autocomplete="new-password" spellcheck="false" required placeholder="例如 123456789:AA..." aria-describedby="TG_BOT_TOKEN-help TG_BOT_TOKEN-error">
+            <button class="field-check" type="button" data-validate-field="TG_BOT_TOKEN">验证</button>
+          </div>
+          <small id="TG_BOT_TOKEN-help" class="field-help">在 Telegram 中打开 @BotFather，发送 /newbot 或进入已有 Bot，复制完整的“数字:密钥”内容，不要带空格。</small>
+          <div id="TG_BOT_TOKEN-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="TG_GROUP_ID">目标群组 ID *</label>
-          <input id="TG_GROUP_ID" name="TG_GROUP_ID" type="text" inputmode="numeric" autocomplete="off" required placeholder="例如 -1001234567890">
-          <small>必须是开启 Topics 的 Telegram 超级群。</small>
+          <div class="field-controls">
+            <input id="TG_GROUP_ID" name="TG_GROUP_ID" type="text" inputmode="numeric" autocomplete="off" required placeholder="例如 -1001234567890" aria-describedby="TG_GROUP_ID-help TG_GROUP_ID-error">
+            <button class="field-check" type="button" data-validate-field="TG_GROUP_ID">验证</button>
+          </div>
+          <small id="TG_GROUP_ID-help" class="field-help">把 Bot 加入开启 Topics 的 Telegram 超级群；群 ID 通常以 -100 开头，可用 API 验证按钮确认类型和 Topics 状态。</small>
+          <div id="TG_GROUP_ID-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="APP_BASE_URL">Worker HTTPS 地址 *</label>
-          <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com">
-          <small>不要添加末尾斜杠。</small>
+          <div class="field-controls">
+            <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com" aria-describedby="APP_BASE_URL-help APP_BASE_URL-error">
+            <button class="field-check" type="button" data-validate-field="APP_BASE_URL">验证</button>
+          </div>
+          <small id="APP_BASE_URL-help" class="field-help">填写将来部署 Worker 的公开 HTTPS 根地址，只保留 origin，例如 https://relay.example.com，不要加路径、查询参数或末尾斜杠。</small>
+          <div id="APP_BASE_URL-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="TURNSTILE_SITE_KEY">Turnstile Site Key *</label>
-          <input id="TURNSTILE_SITE_KEY" name="TURNSTILE_SITE_KEY" type="text" autocomplete="off" spellcheck="false" required>
+          <div class="field-controls">
+            <input id="TURNSTILE_SITE_KEY" name="TURNSTILE_SITE_KEY" type="text" autocomplete="off" spellcheck="false" required aria-describedby="TURNSTILE_SITE_KEY-help TURNSTILE_SITE_KEY-error">
+            <button class="field-check" type="button" data-validate-field="TURNSTILE_SITE_KEY">验证</button>
+          </div>
+          <small id="TURNSTILE_SITE_KEY-help" class="field-help">在 Cloudflare Turnstile 创建站点后，从站点配置复制 Site Key；它可以公开显示，用于浏览器验证组件。</small>
+          <div id="TURNSTILE_SITE_KEY-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="TURNSTILE_SECRET_KEY">Turnstile Secret Key *</label>
-          <input id="TURNSTILE_SECRET_KEY" name="TURNSTILE_SECRET_KEY" type="password" autocomplete="new-password" spellcheck="false" required>
+          <div class="field-controls">
+            <input id="TURNSTILE_SECRET_KEY" name="TURNSTILE_SECRET_KEY" type="password" autocomplete="new-password" spellcheck="false" required aria-describedby="TURNSTILE_SECRET_KEY-help TURNSTILE_SECRET_KEY-error">
+            <button class="field-check" type="button" data-validate-field="TURNSTILE_SECRET_KEY">验证</button>
+          </div>
+          <small id="TURNSTILE_SECRET_KEY-help" class="field-help">在同一个 Turnstile 站点的密钥页面复制 Secret Key；它只写入生成代码，不能公开分享或提交到 Git。</small>
+          <div id="TURNSTILE_SECRET_KEY-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field wide">
           <label for="TG_WEBHOOK_SECRET">Telegram Webhook Secret *</label>
-          <input id="TG_WEBHOOK_SECRET" name="TG_WEBHOOK_SECRET" type="password" autocomplete="new-password" spellcheck="false" required>
-          <small>至少 16 个字符；Telegram 会通过请求头发送它。</small>
+          <div class="field-controls">
+            <input id="TG_WEBHOOK_SECRET" name="TG_WEBHOOK_SECRET" type="password" autocomplete="new-password" spellcheck="false" required aria-describedby="TG_WEBHOOK_SECRET-help TG_WEBHOOK_SECRET-error">
+            <button class="field-check" type="button" data-validate-field="TG_WEBHOOK_SECRET">验证</button>
+          </div>
+          <small id="TG_WEBHOOK_SECRET-help" class="field-help">自己生成 16–256 位随机字符串，只使用字母、数字、下划线或连字符；Telegram 会把它放在 Webhook 请求头中。</small>
+          <div id="TG_WEBHOOK_SECRET-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="VERIFICATION_TTL_MINUTES">验证有效期（分钟） *</label>
-          <input id="VERIFICATION_TTL_MINUTES" name="VERIFICATION_TTL_MINUTES" type="number" min="5" max="1440" step="1" value="30" required>
+          <div class="field-controls">
+            <input id="VERIFICATION_TTL_MINUTES" name="VERIFICATION_TTL_MINUTES" type="number" min="5" max="1440" step="1" value="30" required aria-describedby="VERIFICATION_TTL_MINUTES-help VERIFICATION_TTL_MINUTES-error">
+            <button class="field-check" type="button" data-validate-field="VERIFICATION_TTL_MINUTES">验证</button>
+          </div>
+          <small id="VERIFICATION_TTL_MINUTES-help" class="field-help">填写 5–1440 的整数，单位是分钟；30 分钟适合大多数场景，时间太短可能来不及完成验证。</small>
+          <div id="VERIFICATION_TTL_MINUTES-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
           <label for="STUN_SERVER_URL">STUN URL *</label>
-          <input id="STUN_SERVER_URL" name="STUN_SERVER_URL" type="text" autocomplete="off" spellcheck="false" value="stun:stun.miwifi.com:3478" required>
+          <div class="field-controls">
+            <input id="STUN_SERVER_URL" name="STUN_SERVER_URL" type="text" autocomplete="off" spellcheck="false" value="stun:stun.miwifi.com:3478" required aria-describedby="STUN_SERVER_URL-help STUN_SERVER_URL-error">
+            <button class="field-check" type="button" data-validate-field="STUN_SERVER_URL">验证</button>
+          </div>
+          <small id="STUN_SERVER_URL-help" class="field-help">填写 WebRTC ICE 使用的 STUN 地址，必须以 stun: 开头；不确定时保留默认的 stun:stun.miwifi.com:3478。</small>
+          <div id="STUN_SERVER_URL-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
       </div>
 
@@ -254,13 +298,13 @@
     <section class="modal">
       <div id="star-spinner" class="spinner" aria-hidden="true"></div>
       <h2 id="star-title">先完成一个小提醒</h2>
-      <p id="star-message">需要先给 SentinelRelay 仓库点击 Star，才能进行 API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。</p>
+      <p id="star-message">需要先给 SentinelRelay 仓库点击 Star，才能进行字段验证、API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。</p>
       <div id="star-actions" class="actions"></div>
     </section>
   </div>
 
   <script type="module">
-    import { replaceWorkerPlaceholders, validateDeployConfig } from "./generator.js";
+    import { replaceWorkerPlaceholders, validateDeployConfig, validateDeployField } from "./generator.js";
     import { getStarGateState, markStarRedirect, setPendingAction } from "./gate.js";
 
     const STAR_KEY = "sentinelrelay_star_redirected_v1";
@@ -272,6 +316,7 @@
     const form = document.getElementById("config-form");
     const validateButton = document.getElementById("validate-button");
     const generateButton = document.getElementById("generate-button");
+    const fieldCheckButtons = [...document.querySelectorAll("[data-validate-field]")];
     const formStatus = document.getElementById("form-status");
     const resultPanel = document.getElementById("result-panel");
     const generatedCode = document.getElementById("generated-code");
@@ -297,8 +342,9 @@
     }
 
     function setBusy(isBusy) {
-      validateButton.disabled = isBusy;
-      generateButton.disabled = isBusy;
+      [validateButton, generateButton, ...fieldCheckButtons].forEach((button) => {
+        button.disabled = isBusy;
+      });
       if (isBusy) {
         validateButton.setAttribute("aria-busy", "true");
         generateButton.setAttribute("aria-busy", "true");
@@ -312,7 +358,31 @@
       return Object.fromEntries(new FormData(form).entries());
     }
 
-    function renderConfigErrors(errors) {
+    function fieldInput(name) {
+      return document.getElementById(name);
+    }
+
+    function fieldLabel(name) {
+      const input = fieldInput(name);
+      return input?.closest(".field")?.querySelector("label")?.textContent?.replace(/\s*\*\s*$/, "") || name;
+    }
+
+    function renderFieldError(name, message = "") {
+      const input = fieldInput(name);
+      const error = document.getElementById(`${name}-error`);
+      if (input) input.setAttribute("aria-invalid", message ? "true" : "false");
+      if (error) error.textContent = message;
+    }
+
+    function renderFieldErrors(values = readValues()) {
+      for (const button of fieldCheckButtons) {
+        const name = button.dataset.validateField;
+        renderFieldError(name, validateDeployField(name, values[name]));
+      }
+    }
+
+    function renderConfigErrors(errors, values = readValues()) {
+      renderFieldErrors(values);
       setStatus(formStatus, errors.length ? `请检查以下项目：\n${errors.map((error) => `• ${error}`).join("\n")}` : "", errors.length ? "error" : "");
     }
 
@@ -330,15 +400,26 @@
      * The token is needed in the API path, but it is never put in a query
      * parameter, logged, or returned as part of an error.
      */
-    async function runTelegramValidation(values) {
+    async function runTelegramValidation(values, scope = "all") {
       const token = String(values?.TG_BOT_TOKEN || "").trim();
       const groupId = String(values?.TG_GROUP_ID || "").trim();
-      if (!token || !groupId) return { ok: false, error: "请先填写 Bot Token 和群组 ID" };
+      if (!token) return { ok: false, fieldErrors: { TG_BOT_TOKEN: "请先填写 Bot Token" }, error: "请先填写 Bot Token" };
+      if (scope === "TG_BOT_TOKEN") {
+        try {
+          const bot = await callTelegramMethod(token, "getMe");
+          return bot?.is_bot === true
+            ? { ok: true, bot }
+            : { ok: false, bot, fieldErrors: { TG_BOT_TOKEN: "Bot Token 验证失败" }, error: "Bot Token 验证失败" };
+        } catch (error) {
+          return { ok: false, fieldErrors: { TG_BOT_TOKEN: error?.message || "Bot Token 验证失败" }, error: error?.message || "Bot Token 验证失败" };
+        }
+      }
+      if (!groupId) return { ok: false, fieldErrors: { TG_GROUP_ID: "请先填写群组 ID" }, error: "请先填写群组 ID" };
 
-      async function call(method, payload = {}) {
+      async function callTelegramMethod(botToken, method, payload = {}) {
         let response;
         try {
-          response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -354,7 +435,7 @@
           throw new Error("Telegram API 返回了无法解析的响应");
         }
         if (!response.ok || !body?.ok) {
-          throw new Error(telegramError(body, token, `Telegram API HTTP ${response.status}`));
+          throw new Error(telegramError(body, botToken, `Telegram API HTTP ${response.status}`));
         }
         return body.result;
       }
@@ -362,17 +443,21 @@
       let bot;
       let chat;
       try {
-        bot = await call("getMe");
-        chat = await call("getChat", { chat_id: groupId });
+        bot = await callTelegramMethod(token, "getMe");
       } catch (error) {
-        return { ok: false, bot, chat, error: error?.message || "Telegram API 验证失败" };
+        return { ok: false, bot, fieldErrors: { TG_BOT_TOKEN: error?.message || "Bot Token 验证失败" }, error: error?.message || "Bot Token 验证失败" };
       }
 
       if (!bot || bot.is_bot !== true) {
-        return { ok: false, bot, chat, error: "Bot Token 验证失败" };
+        return { ok: false, bot, fieldErrors: { TG_BOT_TOKEN: "Bot Token 验证失败" }, error: "Bot Token 验证失败" };
+      }
+      try {
+        chat = await callTelegramMethod(token, "getChat", { chat_id: groupId });
+      } catch (error) {
+        return { ok: false, bot, chat, fieldErrors: { TG_GROUP_ID: error?.message || "群组 ID 验证失败" }, error: error?.message || "群组 ID 验证失败" };
       }
       if (!chat || chat.type !== "supergroup" || chat.is_forum !== true) {
-        return { ok: false, bot, chat, error: "目标群组必须是 Telegram 超级群，并开启 Topics" };
+        return { ok: false, bot, chat, fieldErrors: { TG_GROUP_ID: "目标群组必须是 Telegram 超级群，并开启 Topics" }, error: "目标群组必须是 Telegram 超级群，并开启 Topics" };
       }
       return { ok: true, bot, chat };
     }
@@ -432,14 +517,13 @@
       const storage = browserStorage();
       setPendingAction(storage, PENDING_KEY, action);
       const state = getStarGateState(storage, STAR_KEY);
-      const wasValidateDisabled = validateButton.disabled;
-      const wasGenerateDisabled = generateButton.disabled;
-      validateButton.disabled = true;
-      generateButton.disabled = true;
+      const protectedButtons = [validateButton, generateButton, ...fieldCheckButtons];
+      const previousDisabled = protectedButtons.map((button) => button.disabled);
+      protectedButtons.forEach((button) => { button.disabled = true; });
       starModal.hidden = false;
       starSpinner.hidden = false;
       starMessage.textContent = state === "new"
-        ? "需要先给 SentinelRelay 仓库点击 Star，才能进行 API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。"
+        ? "需要先给 SentinelRelay 仓库点击 Star，才能进行字段验证、API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。"
         : "我们记录到你之前已经打开过仓库。点击“我已验证”后，只放行本次操作；这里不会向 GitHub 查询真实 Star 状态。";
       starActions.replaceChildren();
 
@@ -476,8 +560,7 @@
       });
       gateInFlight = promise.finally(() => {
         gateInFlight = null;
-        validateButton.disabled = wasValidateDisabled;
-        generateButton.disabled = wasGenerateDisabled;
+        protectedButtons.forEach((button, index) => { button.disabled = previousDisabled[index]; });
       });
       return gateInFlight;
     }
@@ -491,13 +574,39 @@
       setStatus(formStatus, "正在向 Telegram 请求 getMe 和 getChat…", "busy");
       const telegram = await runTelegramValidation(values);
       if (!telegram.ok) {
+        for (const [name, message] of Object.entries(telegram.fieldErrors || {})) renderFieldError(name, message);
         setStatus(formStatus, `Telegram 验证失败：${telegram.error || "未知错误"}`, "error");
         return null;
       }
+      renderFieldErrors(values);
       const botName = telegram.bot?.username ? `@${telegram.bot.username}` : telegram.bot?.first_name || "当前 Bot";
       const chatName = telegram.chat?.title || telegram.chat?.username || String(values.TG_GROUP_ID);
       setStatus(formStatus, `API 验证成功：${botName} · ${chatName}`, "success");
       return telegram;
+    }
+
+    async function handleFieldValidation(name) {
+      const values = readValues();
+      const localError = validateDeployField(name, values[name]);
+      renderFieldError(name, localError);
+      if (localError) {
+        setStatus(formStatus, `${fieldLabel(name)}：${localError}`, "error");
+        return;
+      }
+
+      if (name === "TG_BOT_TOKEN" || name === "TG_GROUP_ID") {
+        setStatus(formStatus, `正在验证${fieldLabel(name)}…`, "busy");
+        const telegram = await runTelegramValidation(values, name === "TG_BOT_TOKEN" ? "TG_BOT_TOKEN" : "all");
+        for (const [fieldName, message] of Object.entries(telegram.fieldErrors || {})) renderFieldError(fieldName, message);
+        if (!telegram.ok) {
+          setStatus(formStatus, `${fieldLabel(name)}验证失败：${telegram.error || "未知错误"}`, "error");
+          return;
+        }
+        setStatus(formStatus, `${fieldLabel(name)}验证成功。`, "success");
+        return;
+      }
+
+      setStatus(formStatus, `${fieldLabel(name)}格式验证通过。`, "success");
     }
 
     async function handleValidation() {
@@ -524,7 +633,7 @@
         if (!telegram) return;
 
         setStatus(formStatus, "正在读取同源 Worker 模板…", "busy");
-        const response = await fetch("../worker/worker.js", {
+        const response = await fetch("./worker.js", {
           method: "GET",
           credentials: "same-origin",
           cache: "no-store",
@@ -548,6 +657,27 @@
 
     validateButton.addEventListener("click", handleValidation);
     generateButton.addEventListener("click", handleGeneration);
+    fieldCheckButtons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        const name = button.dataset.validateField;
+        if (!(await requestStarGate(`field:${name}`))) return;
+        setBusy(true);
+        try {
+          await handleFieldValidation(name);
+        } catch {
+          setStatus(formStatus, `${fieldLabel(name)}验证失败，请稍后重试。`, "error");
+        } finally {
+          setBusy(false);
+        }
+      });
+    });
+
+    fieldCheckButtons.forEach((button) => {
+      const name = button.dataset.validateField;
+      const input = fieldInput(name);
+      input?.addEventListener("input", () => renderFieldError(name, validateDeployField(name, input.value)));
+      input?.addEventListener("blur", () => renderFieldError(name, validateDeployField(name, input.value)));
+    });
 
     copyButton.addEventListener("click", async () => {
       if (!generatedCode.value) return;
@@ -573,6 +703,7 @@
 
     // Expose only non-persistent helpers for browser smoke tests and embeds.
     window.runTelegramValidation = runTelegramValidation;
+    window.validateDeployField = validateDeployField;
     window.copyGeneratedWorker = copyGeneratedWorker;
 
     // Never let a browser submit the named secret fields into a URL/history.

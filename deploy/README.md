@@ -1,6 +1,6 @@
 # SentinelRelay 部署向导
 
-`deploy/index.html` 是一个完全静态的配置页。它在浏览器中校验 Telegram 配置、读取同源的 `worker/worker.js` 模板并替换配置占位符；不会把 Token、Secret、生成代码写入服务器、URL、下载文件或 `localStorage`。
+`deploy/index.html` 是一个完全静态的配置页。它在浏览器中校验 Telegram 配置、读取同目录的 `worker.js` 模板并替换配置占位符；不会把 Token、Secret、生成代码写入服务器、URL、下载文件或 `localStorage`。
 
 ## 连接 GitHub 部署到 Cloudflare Pages
 
@@ -9,9 +9,9 @@
 - Production branch：`main`
 - Framework preset：`None`
 - Build command：留空
-- Build output directory：`.`
+- Build output directory：`deploy`
 
-部署完成后，访问 Pages 根地址即可自动跳转到 `/deploy/index.html`；也可以直接访问该路径。页面会从同源 `/worker/worker.js` 读取模板。Pages 只负责展示向导和提供静态模板，不接收任何密钥，也不处理 Telegram Webhook。
+部署完成后，访问 Pages 根地址即可直接打开部署向导。页面会从同源 `./worker.js` 读取模板。Pages 只负责展示向导和提供静态模板，不接收任何密钥，也不处理 Telegram Webhook。
 
 生成代码后，仍需把代码单独粘贴到 Cloudflare Workers，并绑定名为 `DB` 的 D1 数据库；这一步不通过 Pages Functions 完成。
 
@@ -33,6 +33,8 @@ python3 -m http.server 8000
 - 填写 Worker 的 HTTPS 基础地址（不要带末尾 `/`）、至少 16 个字符的 Telegram Webhook Secret、验证 TTL 和 `stun:` 地址。
 
 页面不会保存表单。刷新或关闭标签页会丢失配置；生成的代码也只存在于当前页面内存和用户主动复制到的系统剪贴板中。
+
+每个配置框下方都有“填写教程”和独立的“验证”按钮：Bot Token/群组 ID 会直接调用 Telegram API，其余字段会检查格式和范围。API 验证、生成代码以及所有字段验证按钮共用同一套 Star 提醒流程；首次操作会先显示跳转提示，返回后点击“我已验证”才会继续执行。
 
 ## 3. 部署生成的 Worker
 
