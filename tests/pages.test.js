@@ -28,3 +28,16 @@ test("result page escapes title and description", () => {
   assert.match(html, /x&quot;&amp;y/);
   assert.doesNotMatch(html, /<blocked>/);
 });
+
+test("verification page safely embeds an attacker-controlled STUN value", () => {
+  const html = renderVerificationPage({
+    siteKey: "site-key",
+    sessionId: "abc",
+    stunServerUrl: "stun:evil.example</script><script>alert(1)</script>&\u2028\u2029"
+  });
+  assert.doesNotMatch(html, /<\/script><script>alert\(1\)<\/script>/);
+  assert.match(html, /\\u003C\/script\\u003E/);
+  assert.match(html, /\\u0026/);
+  assert.match(html, /\\u2028/);
+  assert.match(html, /\\u2029/);
+});

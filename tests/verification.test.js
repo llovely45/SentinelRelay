@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildFingerprintMeta,
+  createStore,
   handleVerificationRequest,
   lookupIpMetadata,
   verifyTurnstile
 } from "../worker/worker.js";
+import { createFakeD1 } from "./fake-d1.js";
 import { fakeStoreWithExpiredSession, fakeTelegram } from "./test-helpers.js";
 
 function responseJson(payload, status = 200) {
@@ -96,6 +98,7 @@ test("verification persists fingerprint before matching and completes a pending 
     env: {
       TURNSTILE_SECRET_KEY: "secret",
       TURNSTILE_FETCH: async () => responseJson({ success: true }),
+      IP_METADATA_FETCH: async () => responseJson({}),
       TG_GROUP_ID: "-100123"
     },
     store,
@@ -105,6 +108,208 @@ test("verification persists fingerprint before matching and completes a pending 
   assert.ok(latest?.id);
   assert.deepEqual(calls.map((call) => call[0]), ["fingerprint", "labels", "verified"]);
   assert.equal(telegram.calls.some((call) => call.method === "createForumTopic"), true);
+});
+
+test("metadata timeout returns null without waiting for an unbounded fetch", async () => {
+  const started = Date.now();
+  const result = await lookupIpMetadata("8.8.8.8", {}, async (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  }), { timeoutMs: 5 });
+  assert.equal(result, null);
+  assert.ok(Date.now() - started < 1000);
+  const jsonResult = await lookupIpMetadata("8.8.4.4", {}, async () => ({
+    ok: true,
+    status: 200,
+    async json() { return new Promise(() => {}); }
+  }), { timeoutMs: 5 });
+  assert.equal(jsonResult, null);
+});
+
+test("D1 verification claim is single-use and releasable", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 45, first_name: "Claim" });
+  const session = await store.createVerificationSession(45, 30);
+  assert.equal(await store.claimVerificationSession(45, session.session_id), true);
+  assert.equal(await store.claimVerificationSession(45, session.session_id), false);
+  assert.equal(await store.releaseVerificationSession(45, session.session_id), true);
+  assert.equal(await store.claimVerificationSession(45, session.session_id), true);
+});
+
+test("concurrent verification claims a session before creating a topic", async () => {
+  const user = { user_id: 42, first_name: "Concurrent", is_verified: 0, is_blacklisted: 0 };
+  const session = { session_id: "race", user_id: 42, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
+  let claims = 0;
+  let topics = 0;
+  let messages = 0;
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return []; },
+    async getUser() { return { ...user }; },
+    async claimVerificationSession() {
+      const winner = claims++ === 0;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return winner;
+    },
+    async markVerified() { return { ...user, is_verified: 1, topic_thread_id: 77 }; }
+  };
+  const telegram = {
+    async createForumTopic() {
+      topics += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { message_thread_id: 77 };
+    },
+    async sendMessage() { messages += 1; }
+  };
+  const env = {
+    TG_GROUP_ID: "-100123",
+    TURNSTILE_SECRET_KEY: "secret",
+    TURNSTILE_FETCH: async () => responseJson({ success: true }),
+    IP_METADATA_FETCH: async () => responseJson({})
+  };
+  const makeRequest = () => new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  });
+  const responses = await Promise.all([
+    handleVerificationRequest(makeRequest(), "race", { env, store, telegram }),
+    handleVerificationRequest(makeRequest(), "race", { env, store, telegram })
+  ]);
+  assert.equal(responses.filter((response) => response.status === 200).length, 1);
+  assert.equal(responses.filter((response) => response.status === 409).length, 1);
+  assert.equal(topics, 1);
+  assert.equal(messages, 2);
+});
+
+test("missing topic id fails without marking the user verified", async () => {
+  let marked = false;
+  let released = false;
+  const user = { user_id: 43, first_name: "No topic", is_verified: 0, is_blacklisted: 0 };
+  const session = { session_id: "no-topic", user_id: 43, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return []; },
+    async getUser() { return { ...user }; },
+    async claimVerificationSession() { return true; },
+    async releaseVerificationSession() { released = true; },
+    async markVerified() { marked = true; return { ...user, is_verified: 1 }; }
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), "no-topic", {
+    env: { TG_GROUP_ID: "-100123", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}) },
+    store,
+    telegram: { async createForumTopic() { return {}; }, async sendMessage() { throw new Error("must not send"); } }
+  });
+  assert.equal(response.status, 500);
+  assert.equal(marked, false);
+  assert.equal(released, true);
+});
+
+test("successful verification deletes its saved prompt best-effort", async () => {
+  const deleted = [];
+  const user = { user_id: 44, first_name: "Prompt", is_verified: 0, is_blacklisted: 0, verification_prompt_chat_id: 44, verification_prompt_message_id: 9 };
+  const session = { session_id: "prompt", user_id: 44, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return []; },
+    async getUser() { return { ...user }; },
+    async claimVerificationSession() { return true; },
+    async markVerified() { return { ...user, is_verified: 1, topic_thread_id: 77 }; }
+  };
+  const telegram = {
+    async createForumTopic() { return { message_thread_id: 77 }; },
+    async sendMessage() {},
+    async deleteMessage(...args) { deleted.push(args); }
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), "prompt", {
+    env: { TG_GROUP_ID: "-100123", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}) },
+    store,
+    telegram
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(deleted, [[44, 9]]);
+});
+
+test("group notification failure returns a generic error without leaking details", async () => {
+  const user = { user_id: 46, first_name: "Telegram error", is_verified: 0, is_blacklisted: 0 };
+  const session = { session_id: "telegram-error", user_id: 46, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
+  let marked = false;
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return []; },
+    async getUser() { return { ...user }; },
+    async claimVerificationSession() { return true; },
+    async markVerified() { marked = true; return { ...user, is_verified: 1, topic_thread_id: 78 }; }
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), "telegram-error", {
+    env: { TG_GROUP_ID: "-100123", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}) },
+    store,
+    telegram: {
+      async createForumTopic() { return { message_thread_id: 78 }; },
+      async sendMessage() { throw new Error("telegram secret detail"); }
+    }
+  });
+  assert.equal(response.status, 500);
+  assert.equal(marked, true);
+  assert.doesNotMatch(await response.text(), /telegram secret detail/);
+});
+
+test("invalid expiry is treated as expired before Turnstile", async () => {
+  let called = false;
+  const response = await handleVerificationRequest(new Request("https://x/api", { method: "POST" }), "bad-expiry", {
+    env: { TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => { called = true; } },
+    store: { async getSession() { return { session_id: "bad-expiry", user_id: 1, status: "pending", expires_at: "not-a-date" }; } },
+    telegram: fakeTelegram()
+  });
+  assert.equal(response.status, 410);
+  assert.equal(called, false);
+});
+
+test("malformed fingerprint threshold fails closed to exact matching", async () => {
+  const details = {
+    os: "未知",
+    cpu: { hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0 },
+    screen: { width: 1280, height: 800, availWidth: 1280, availHeight: 800, colorDepth: 24, pixelDepth: 24, pixelRatio: 1 },
+    fonts: ["Arial"],
+    canvas: "same",
+    webgl: { hash: "webgl", vendor: "vendor", renderer: "renderer" },
+    audio: "audio",
+    browser: {}
+  };
+  const weaker = await buildFingerprintMeta({ system: "未知", fingerprint: { ...details, canvas: "different" } });
+  const session = { session_id: "threshold", user_id: 47, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", is_verified: 0, is_blacklisted: 0 };
+  let blacklisted = false;
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return [{ label_name: "weak", fingerprint_meta: weaker, is_blocked: 1 }]; },
+    async blacklistUser() { blacklisted = true; },
+    async getUser() { return { ...session }; },
+    async claimVerificationSession() { return true; },
+    async markVerified() { return { ...session, is_verified: 1, topic_thread_id: 79 }; }
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token", fingerprint_payload: JSON.stringify(details) })
+  }), "threshold", {
+    env: { FINGERPRINT_MATCH_THRESHOLD: "not-a-number", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}), TG_GROUP_ID: "-100123" },
+    store,
+    telegram: { async createForumTopic() { return { message_thread_id: 79 }; }, async sendMessage() {} }
+  });
+  assert.equal(response.status, 200);
+  assert.equal(blacklisted, false);
 });
 
 test("blocked fingerprint blacklists user and returns a 403 result", async () => {

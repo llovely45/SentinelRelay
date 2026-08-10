@@ -244,6 +244,21 @@ export function createFakeD1() {
     }
 
     if (lower.startsWith("update verification_sessions set")) {
+      const claimsSession = lower.includes("set status = 'processing'");
+      const releasesSession = lower.includes("set status = 'pending'") && lower.includes("status = 'processing'");
+      if (claimsSession || releasesSession) {
+        const [sessionId, userId] = params;
+        const row = sessions.get(String(sessionId));
+        if (!row || String(row.user_id) !== String(userId)) return runResult(0);
+        if (claimsSession && row.status !== "pending") return runResult(0);
+        if (releasesSession && row.status !== "processing") return runResult(0);
+        if (claimsSession && lower.includes("expires_at > ?")
+          && Date.parse(String(row.expires_at)) <= Date.parse(String(params[2]))) {
+          return runResult(0);
+        }
+        row.status = claimsSession ? "processing" : "pending";
+        return runResult(1);
+      }
       const isFailed = lower.includes("status = 'failed'");
       const sessionId = isFailed ? params[2] : params[1];
       const userId = isFailed ? params[3] : params[2];

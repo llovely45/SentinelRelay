@@ -475,9 +475,14 @@ function normalizeMetadataResult(ip, value = {}) {
 /**
  * Read ASN/organization metadata from Cloudflare request.cf where available;
  * otherwise use a small public HTTP lookup.  Metadata is advisory: a failed
- * lookup still returns the IP so fingerprint verification can continue.
+ * lookup returns null and the caller can retain the normalized IP itself.
  */
-export async function lookupIpMetadata(ip, request = null, fetchImpl = globalThis.fetch) {
+export async function lookupIpMetadata(
+  ip,
+  request = null,
+  fetchImpl = globalThis.fetch,
+  { timeoutMs = 3000, setTimeoutImpl = globalThis.setTimeout, clearTimeoutImpl = globalThis.clearTimeout } = {}
+) {
   const normalizedIp = normalizeString(ip);
   if (!normalizedIp || !isPublicIp(normalizedIp)) return null;
 
@@ -488,23 +493,41 @@ export async function lookupIpMetadata(ip, request = null, fetchImpl = globalThi
     asOrganization: cf.asOrganization || cf.as_organization || cf.organization
   });
   if (fromCf.asn || fromCf.organization) return fromCf;
-  if (typeof fetchImpl !== "function") return fromCf;
+  if (typeof fetchImpl !== "function") return null;
+
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutDuration = Math.max(1, Number(timeoutMs) || 3000);
+  let timeout = null;
+  let timeoutPromise = null;
+  if (typeof setTimeoutImpl === "function") {
+    timeoutPromise = new Promise((_, reject) => {
+      timeout = setTimeoutImpl(() => {
+        try { controller?.abort(); } catch {}
+        reject(new Error("IP metadata lookup timed out"));
+      }, timeoutDuration);
+    });
+  }
 
   try {
     // ipapi.co is intentionally used only as a fallback.  The request never
     // carries the Turnstile token, Telegram credentials, or browser payload.
-    const response = await fetchImpl(`https://ipapi.co/${encodeURIComponent(normalizedIp)}/json/`, {
-      headers: { Accept: "application/json" }
+    const fetchPromise = fetchImpl(`https://ipapi.co/${encodeURIComponent(normalizedIp)}/json/`, {
+      headers: { Accept: "application/json" },
+      ...(controller ? { signal: controller.signal } : {})
     });
+    const response = timeoutPromise ? await Promise.race([fetchPromise, timeoutPromise]) : await fetchPromise;
     const status = Number(response?.status);
     const ok = response && response.ok !== false
       && (!Number.isFinite(status) || (status >= 200 && status < 300));
-    if (!ok) return fromCf;
-    const payload = await response.json();
+    if (!ok) return null;
+    const jsonPromise = response.json();
+    const payload = timeoutPromise ? await Promise.race([jsonPromise, timeoutPromise]) : await jsonPromise;
     const result = normalizeMetadataResult(normalizedIp, payload);
-    return result.ip ? result : fromCf;
+    return result.ip ? result : null;
   } catch {
-    return fromCf;
+    return null;
+  } finally {
+    if (timeout !== null && typeof clearTimeoutImpl === "function") clearTimeoutImpl(timeout);
   }
 }
 
@@ -697,10 +720,12 @@ export async function handleVerificationRequest(
   const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
   const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
   const metadataFetch = env.IP_METADATA_FETCH || env.fetchImpl || globalThis.fetch;
+  const metadataTimeoutMs = configValue(env, ["IP_METADATA_TIMEOUT_MS", "ipMetadataTimeoutMs"], 3000);
   const metadataList = await Promise.all(allIps.map((ip) => lookupIpMetadata(
     ip,
     ip === remoteIp ? request : null,
-    metadataFetch
+    metadataFetch,
+    { timeoutMs: metadataTimeoutMs }
   )));
   const metadataByIp = new Map(metadataList.filter(Boolean).map((item) => [item.ip, item]));
   const publicIpInfo = remoteIp
@@ -727,8 +752,9 @@ export async function handleVerificationRequest(
   }
   // A blocked label is intentionally an exact match by default.  Operators
   // can opt into a lower threshold explicitly when their labels are trusted.
-  const thresholdValue = Number(configValue(env, ["FINGERPRINT_MATCH_THRESHOLD", "fingerprintMatchThreshold"], 100));
-  const blockedMatches = findSimilarFingerprintLabels(fingerprintMeta, labels, Number.isFinite(thresholdValue) ? thresholdValue : 60)
+  const configuredThreshold = Number(configValue(env, ["FINGERPRINT_MATCH_THRESHOLD", "fingerprintMatchThreshold"], 100));
+  const thresholdValue = Number.isFinite(configuredThreshold) ? configuredThreshold : 100;
+  const blockedMatches = findSimilarFingerprintLabels(fingerprintMeta, labels, thresholdValue)
     .filter((label) => label.is_blocked === undefined || Number(label.is_blocked));
   if (blockedMatches.length) {
     const reason = `fingerprint_blocked:${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(",")}`;
@@ -756,32 +782,71 @@ export async function handleVerificationRequest(
   const currentUser = typeof store.getUser === "function"
     ? (await store.getUser(session.user_id) || session)
     : session;
-  let threadId = currentUser.topic_thread_id || session.topic_thread_id || null;
-  if (!threadId && typeof telegram?.createForumTopic === "function") {
-    const topicName = currentUser.username
-      ? `${currentUser.first_name || "User"} (@${currentUser.username})`
-      : `${currentUser.first_name || "User"} (${currentUser.user_id})`;
-    const topic = await telegram.createForumTopic(groupId, topicName.slice(0, 120));
-    threadId = topic?.message_thread_id ?? topic?.messageThreadId ?? null;
-  }
-  const verifiedUser = typeof store.markVerified === "function"
-    ? await store.markVerified(session.user_id, threadId, id)
-    : currentUser;
-  if (!verifiedUser && typeof store.markVerified === "function") {
-    return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 200);
-  }
-  const userForNotice = verifiedUser || currentUser || session;
-  if (typeof telegram?.sendMessage === "function") {
-    if (groupId !== "" && threadId) {
-      await telegram.sendMessage(groupId, [
-        telegramUserInfo(userForNotice),
-        `指纹: ${fingerprintMeta.id}`,
-        `公网 IP: ${fingerprintMeta.publicIpInfo?.ip || "无"}`
-      ].join("\n"), { message_thread_id: threadId });
+  let claimed = false;
+  if (typeof store.claimVerificationSession === "function") {
+    try {
+      claimed = await store.claimVerificationSession(session.user_id, id);
+    } catch {
+      return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
     }
-    await notifyTelegram(telegram, session.user_id, "验证成功，请回到 Telegram 继续聊天。", {});
+    if (!claimed) {
+      return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
+    }
   }
-  return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
+
+  let marked = false;
+  try {
+    let threadId = currentUser.topic_thread_id || session.topic_thread_id || null;
+    if (threadId === null || threadId === undefined || threadId === "") {
+      if (typeof telegram?.createForumTopic !== "function") throw new Error("Telegram topic creation is unavailable");
+      const topicName = currentUser.username
+        ? `${currentUser.first_name || "User"} (@${currentUser.username})`
+        : `${currentUser.first_name || "User"} (${currentUser.user_id})`;
+      const topic = await telegram.createForumTopic(groupId, topicName.slice(0, 120));
+      threadId = topic?.message_thread_id ?? topic?.messageThreadId;
+    }
+    const numericThreadId = Number(threadId);
+    if (!Number.isInteger(numericThreadId) || numericThreadId <= 0) {
+      throw new Error("Telegram did not return a valid forum topic id");
+    }
+
+    const verifiedUser = typeof store.markVerified === "function"
+      ? await store.markVerified(session.user_id, numericThreadId, id)
+      : currentUser;
+    if (!verifiedUser && typeof store.markVerified === "function") {
+      if (claimed && typeof store.releaseVerificationSession === "function") {
+        try { await store.releaseVerificationSession(session.user_id, id); } catch {}
+      }
+      return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
+    }
+    marked = typeof store.markVerified === "function";
+
+    const promptChatId = currentUser.verification_prompt_chat_id ?? session.verification_prompt_chat_id;
+    const promptMessageId = currentUser.verification_prompt_message_id ?? session.verification_prompt_message_id;
+    if (typeof telegram?.deleteMessage === "function"
+      && promptChatId !== null && promptChatId !== undefined
+      && promptMessageId !== null && promptMessageId !== undefined) {
+      try { await telegram.deleteMessage(promptChatId, promptMessageId); } catch {}
+    }
+
+    const userForNotice = verifiedUser || currentUser || session;
+    if (typeof telegram?.sendMessage === "function") {
+      if (groupId !== "") {
+        await telegram.sendMessage(groupId, [
+          telegramUserInfo(userForNotice),
+          `指纹: ${fingerprintMeta.id}`,
+          `公网 IP: ${fingerprintMeta.publicIpInfo?.ip || "无"}`
+        ].join("\n"), { message_thread_id: numericThreadId });
+      }
+      await notifyTelegram(telegram, session.user_id, "验证成功，请回到 Telegram 继续聊天。", {});
+    }
+    return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
+  } catch {
+    if (claimed && !marked && typeof store.releaseVerificationSession === "function") {
+      try { await store.releaseVerificationSession(session.user_id, id); } catch {}
+    }
+    return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
+  }
 }
 
 function renderVerificationPageHtml({
@@ -797,7 +862,14 @@ function renderVerificationPageHtml({
   const safeSiteKey = escapeHtml(siteKey);
   const safeAction = escapeHtml(formAction);
   const safeSession = escapeHtml(initialSessionId);
-  const safeStun = JSON.stringify(String(stunServerUrl || "stun:stun.miwifi.com:3478"));
+  const safeStun = JSON.stringify(String(stunServerUrl || "stun:stun.miwifi.com:3478"))
+    .replace(/[<>&\u2028\u2029]/g, (character) => ({
+      "<": "\\u003C",
+      ">": "\\u003E",
+      "&": "\\u0026",
+      "\u2028": "\\u2028",
+      "\u2029": "\\u2029"
+    }[character]));
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -961,7 +1033,7 @@ function normalizePage(value, fallback) {
 
 function isExpiredTimestamp(value, now = Date.now()) {
   const timestamp = Date.parse(String(value ?? ""));
-  return Number.isFinite(timestamp) && timestamp <= now;
+  return !Number.isFinite(timestamp) || timestamp <= now;
 }
 
 function hydrateUser(row) {
@@ -1120,13 +1192,34 @@ export function createStore(db) {
     return getUser(userId);
   }
 
+  /** Atomically reserve a pending verification before creating a Telegram topic. */
+  async function claimVerificationSession(userId, sessionId) {
+    const now = new Date().toISOString();
+    const result = await run(`
+      UPDATE verification_sessions
+      SET status = 'processing'
+      WHERE session_id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?
+    `, sessionId, userId, now);
+    return Number(result?.meta?.changes || 0) === 1;
+  }
+
+  /** Return a failed topic attempt to pending so a user can retry safely. */
+  async function releaseVerificationSession(userId, sessionId) {
+    const result = await run(`
+      UPDATE verification_sessions
+      SET status = 'pending'
+      WHERE session_id = ? AND user_id = ? AND status = 'processing'
+    `, sessionId, userId);
+    return Number(result?.meta?.changes || 0) === 1;
+  }
+
   async function markVerified(userId, threadId, sessionId) {
     const now = new Date().toISOString();
     const results = await db.batch([
       db.prepare(`
         UPDATE verification_sessions
         SET status = 'passed', consumed_at = ?
-        WHERE session_id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?
+        WHERE session_id = ? AND user_id = ? AND status IN ('pending', 'processing') AND expires_at > ?
           AND EXISTS (
             SELECT 1 FROM users WHERE user_id = ? AND is_verified = 0
           )
@@ -1384,6 +1477,8 @@ export function createStore(db) {
     clearVerificationPrompt,
     setTopicThreadId,
     setLatestFingerprint,
+    claimVerificationSession,
+    releaseVerificationSession,
     markVerified,
     approveUser,
     cancelVerification,
