@@ -253,3 +253,24 @@ test("pending fingerprint actions are consumed once", async () => {
   assert.deepEqual(first.action, { type: "markfp", isBlocked: false });
   assert.equal(second, null);
 });
+
+test("a duplicate pending-label delivery that loses the claim is not relayed privately", async () => {
+  const store = await makeStore();
+  const telegram = fakeTelegram();
+  await store.upsertTelegramUser({ id: 7, first_name: "Alice" });
+  await store.approveUser(7);
+  await store.setTopicThreadId(7, 888);
+  store.consumePendingAdminAction = async () => ({ action: null, consumed: false });
+
+  await processTelegramUpdate({
+    message: {
+      message_id: 31,
+      message_thread_id: 888,
+      chat: { id: config.groupId, type: "supergroup" },
+      from: { id: 99 },
+      text: "office|duplicate"
+    }
+  }, { config, store, telegram });
+
+  assert.equal(telegram.calls.some((call) => call.method === "copyMessage"), false);
+});

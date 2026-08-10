@@ -794,14 +794,20 @@ export function createStore(db) {
     if (!row) return null;
     const action = row.action;
     const actionType = typeof action === "string" ? action : action?.type ?? action?.action;
-    if (expectedType !== undefined && actionType !== expectedType) return null;
+    if (expectedType !== undefined && actionType !== expectedType) {
+      return { action: null, consumed: false };
+    }
     const now = new Date().toISOString();
     const result = await run(`
       DELETE FROM pending_admin_actions
       WHERE thread_id = ? AND admin_id = ? AND expires_at > ?
     `, threadId, adminId, now);
-    if (Number(result?.meta?.changes || 0) !== 1) return null;
-    return row;
+    if (Number(result?.meta?.changes || 0) !== 1) {
+      // A row existed when we read it, but another retry won the conditional
+      // delete.  Preserve that distinction so callers do not relay the text.
+      return { action: null, consumed: false };
+    }
+    return { ...row, consumed: true };
   }
 
   async function getRuntimeSetting(key) {
@@ -1355,8 +1361,9 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
       if (!(await isGroupAdmin(message.from.id))) return true;
       pending = await store.consumePendingAdminAction(threadId, message.from.id, "markfp");
       // Another webhook retry may have claimed and removed this action first;
-      // let the message continue through normal topic relay in that case.
+      // consumePendingAdminAction reports a non-null sentinel for that case.
       if (!pending) return false;
+      if (pending.consumed === false) return true;
     } else {
       pending = typeof store.getPendingAdminAction === "function"
         ? await store.getPendingAdminAction(threadId, message.from.id)
