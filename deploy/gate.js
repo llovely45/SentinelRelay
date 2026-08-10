@@ -36,13 +36,27 @@ export function getStarGateState(storage, key) {
   ) {
     return "new";
   }
-  return "redirected";
+  return isFiniteTimestamp(record.verifiedAt) ? "verified" : "redirected";
 }
 
 /** Persist only the redirect timestamp and repository URL under the Star key. */
 export function markStarRedirect(storage, key, repoUrl, now = Date.now()) {
   const timestamp = now instanceof Date ? now.getTime() : now;
   writeJson(storage, key, { redirectedAt: timestamp, repoUrl: String(repoUrl) });
+}
+
+/** Persist the local confirmation that follows the second protected action. */
+export function markStarVerified(storage, key, now = Date.now()) {
+  const timestamp = now instanceof Date ? now.getTime() : now;
+  const record = readJson(storage, key);
+  const repoUrl = record && typeof record === "object" && typeof record.repoUrl === "string"
+    ? record.repoUrl
+    : "";
+  writeJson(storage, key, {
+    redirectedAt: isFiniteTimestamp(record?.redirectedAt) ? record.redirectedAt : timestamp,
+    repoUrl,
+    verifiedAt: timestamp
+  });
 }
 
 /** Read the pending action value, returning null for malformed/unavailable data. */

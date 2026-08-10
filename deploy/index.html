@@ -181,15 +181,25 @@
   <main>
     <header>
       <p class="eyebrow">SentinelRelay · Cloudflare Worker</p>
-      <h1>部署向导</h1>
-      <p>在浏览器中校验 Telegram 配置，并生成可直接粘贴到 Cloudflare Workers 的单文件 Worker。密钥只在当前页面内存中处理，不会上传、下载或写入浏览器存储。</p>
+      <h1 id="wizard-title" tabindex="0">部署向导</h1>
+      <p>先创建一个默认的 Cloudflare Worker 并绑定 D1，再在这里检查 Worker 地址，最后完成 Telegram 配置并生成可直接粘贴的单文件 Worker。表单值会保存在当前浏览器的持久化存储中，不会上传到本页服务器。</p>
     </header>
 
     <form id="config-form" class="card" novalidate>
-      <h2>1. 填写运行配置</h2>
-      <p class="privacy-note">带 <strong>*</strong> 的项目必填。Telegram Bot Token、Turnstile Secret 和 Webhook Secret 使用密码输入框；生成后请把它们视为已暴露，必要时立即轮换。</p>
+      <h2>1. 先准备并检查 Worker</h2>
+      <p class="privacy-note">在 Cloudflare Workers 中创建默认项目，创建 D1 数据库并绑定为 <strong>DB</strong>，先部署默认代码拿到 HTTPS 地址；确认地址可达后再填写其余项目。带 <strong>*</strong> 的项目必填。Token 和 Secret 会随表单一起保存在本浏览器，使用公共设备后请清除本站点数据。</p>
 
       <div class="field-grid">
+        <div class="field wide">
+          <label for="APP_BASE_URL">Worker HTTPS 地址 *</label>
+          <div class="field-controls">
+            <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com" aria-describedby="APP_BASE_URL-help APP_BASE_URL-error">
+            <button class="field-check" type="button" data-validate-field="APP_BASE_URL">检查可达</button>
+          </div>
+          <small id="APP_BASE_URL-help" class="field-help">先在 Cloudflare Workers 创建默认项目并绑定 D1（绑定名必须是 DB），部署默认 Worker 后复制它的公开 HTTPS 根地址。这里只填 origin，例如 https://relay.example.com，不要加路径、查询参数或末尾斜杠；点击“检查可达”会从当前浏览器请求 Worker 根路径。</small>
+          <div id="APP_BASE_URL-error" class="field-error" role="alert" aria-live="polite"></div>
+        </div>
+
         <div class="field wide">
           <label for="TG_BOT_TOKEN">Telegram Bot Token *</label>
           <div class="field-controls">
@@ -208,16 +218,6 @@
           </div>
           <small id="TG_GROUP_ID-help" class="field-help">把 Bot 加入开启 Topics 的 Telegram 超级群；群 ID 通常以 -100 开头，可用 API 验证按钮确认类型和 Topics 状态。</small>
           <div id="TG_GROUP_ID-error" class="field-error" role="alert" aria-live="polite"></div>
-        </div>
-
-        <div class="field">
-          <label for="APP_BASE_URL">Worker HTTPS 地址 *</label>
-          <div class="field-controls">
-            <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com" aria-describedby="APP_BASE_URL-help APP_BASE_URL-error">
-            <button class="field-check" type="button" data-validate-field="APP_BASE_URL">验证</button>
-          </div>
-          <small id="APP_BASE_URL-help" class="field-help">填写将来部署 Worker 的公开 HTTPS 根地址，只保留 origin，例如 https://relay.example.com，不要加路径、查询参数或末尾斜杠。</small>
-          <div id="APP_BASE_URL-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="field">
@@ -297,23 +297,39 @@
   <div id="star-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="star-title" aria-describedby="star-message">
     <section class="modal">
       <div id="star-spinner" class="spinner" aria-hidden="true"></div>
-      <h2 id="star-title">先完成一个小提醒</h2>
-      <p id="star-message">需要先给 SentinelRelay 仓库点击 Star，才能进行字段验证、API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。</p>
+      <h2 id="star-title">请稍候</h2>
+      <p id="star-message">正在准备下一步…</p>
       <div id="star-actions" class="actions"></div>
     </section>
   </div>
 
   <script type="module">
     import { replaceWorkerPlaceholders, validateDeployConfig, validateDeployField } from "./generator.js";
-    import { getStarGateState, markStarRedirect, setPendingAction } from "./gate.js";
+    import { getStarGateState, markStarRedirect, markStarVerified, setPendingAction } from "./gate.js";
 
     const STAR_KEY = "sentinelrelay_star_redirected_v1";
     const PENDING_KEY = "sentinelrelay_pending_action_v1";
+    const CONFIG_KEY = "sentinelrelay_config_v1";
     const REPOSITORY_URL = "https://github.com/llovely45/SentinelRelay";
     const GATE_DELAY_MS = 1000;
+    const RESET_CLICK_COUNT = 5;
+    const RESET_CLICK_WINDOW_MS = 1800;
+    const CONFIG_FIELDS = Object.freeze([
+      "TG_BOT_TOKEN",
+      "TG_GROUP_ID",
+      "APP_BASE_URL",
+      "TURNSTILE_SITE_KEY",
+      "TURNSTILE_SECRET_KEY",
+      "TG_WEBHOOK_SECRET",
+      "VERIFICATION_TTL_MINUTES",
+      "STUN_SERVER_URL"
+    ]);
     let gateInFlight = null;
+    let resetClickCount = 0;
+    let resetClickTimer = null;
 
     const form = document.getElementById("config-form");
+    const wizardTitle = document.getElementById("wizard-title");
     const validateButton = document.getElementById("validate-button");
     const generateButton = document.getElementById("generate-button");
     const fieldCheckButtons = [...document.querySelectorAll("[data-validate-field]")];
@@ -355,7 +371,53 @@
     }
 
     function readValues() {
-      return Object.fromEntries(new FormData(form).entries());
+      const values = Object.fromEntries(new FormData(form).entries());
+      persistConfig(values);
+      return values;
+    }
+
+    function readPersistedConfig(storage = browserStorage()) {
+      if (!storage || typeof storage.getItem !== "function") return {};
+      try {
+        const raw = storage.getItem(CONFIG_KEY);
+        const values = raw ? JSON.parse(raw) : {};
+        if (!values || typeof values !== "object" || Array.isArray(values)) return {};
+        return Object.fromEntries(CONFIG_FIELDS
+          .filter((name) => typeof values[name] === "string")
+          .map((name) => [name, values[name]]));
+      } catch {
+        return {};
+      }
+    }
+
+    function persistConfig(values = readValues()) {
+      const storage = browserStorage();
+      if (!storage || typeof storage.setItem !== "function") return;
+      const safeValues = Object.fromEntries(CONFIG_FIELDS.map((name) => [name, String(values[name] ?? "")]));
+      try {
+        storage.setItem(CONFIG_KEY, JSON.stringify(safeValues));
+      } catch {
+        // Persistence is best effort when storage is blocked or full.
+      }
+    }
+
+    function restorePersistedConfig() {
+      const values = readPersistedConfig();
+      for (const name of CONFIG_FIELDS) {
+        const input = document.getElementById(name);
+        if (input && Object.hasOwn(values, name)) input.value = values[name];
+      }
+    }
+
+    function clearGatePersistence() {
+      const storage = browserStorage();
+      if (!storage || typeof storage.removeItem !== "function") return;
+      try {
+        storage.removeItem(STAR_KEY);
+        storage.removeItem(PENDING_KEY);
+      } catch {
+        // A blocked storage area cannot be cleared; the page still works in memory.
+      }
     }
 
     function fieldInput(name) {
@@ -462,6 +524,44 @@
       return { ok: true, bot, chat };
     }
 
+    /** Check the pre-created Worker root without triggering webhook setup. */
+    async function runWorkerReachability(values) {
+      const baseUrl = String(values?.APP_BASE_URL || "").trim();
+      if (!baseUrl) return { ok: false, error: "请先填写 Worker HTTPS 地址" };
+      try {
+        const response = await fetch(`${baseUrl}/`, {
+          method: "GET",
+          mode: "cors",
+          cache: "no-store",
+          redirect: "follow",
+          headers: { Accept: "text/plain, application/json" }
+        });
+        if (response.ok) return { ok: true, status: response.status };
+        return {
+          ok: false,
+          error: response.status === 500
+            ? "Worker 地址可达，但 D1 绑定或默认 Worker 尚未正常运行"
+            : `Worker 返回 HTTP ${response.status}`
+        };
+      } catch {
+        // A freshly created default Worker often has no CORS header. A
+        // no-cors probe still proves that DNS/TLS/HTTP reached the Worker;
+        // the generated template adds CORS for the later readable probe.
+        try {
+          const opaque = await fetch(`${baseUrl}/`, {
+            method: "GET",
+            mode: "no-cors",
+            cache: "no-store",
+            redirect: "follow"
+          });
+          if (opaque.type === "opaque" || opaque.ok) return { ok: true, opaque: true };
+        } catch {
+          // Fall through to the actionable network error below.
+        }
+        return { ok: false, error: "Worker 地址无法访问，请确认已部署且 HTTPS 地址正确" };
+      }
+    }
+
     /** Copy generated source without putting it in localStorage or a URL. */
     async function copyGeneratedWorker(code) {
       const source = String(code ?? "");
@@ -507,9 +607,10 @@
     }
 
     /**
-     * Resolve one protected action after the local Star reminder. No config
-     * value is saved; only the non-secret action name and redirect marker use
-     * localStorage through the tested gate module.
+     * Resolve one protected action through the local, one-time reminder flow.
+     * The first attempt opens the repository and stops. The next attempt has
+     * a one-second delay before the confirmation button becomes available;
+     * after confirmation all later actions pass without a dialog.
      */
     function requestStarGate(action) {
       if (gateInFlight) return gateInFlight;
@@ -517,14 +618,26 @@
       const storage = browserStorage();
       setPendingAction(storage, PENDING_KEY, action);
       const state = getStarGateState(storage, STAR_KEY);
+      if (state === "verified") return Promise.resolve(true);
+
+      if (state === "new") {
+        // Record before opening a new tab so the next visit enters the
+        // confirmation branch even when the browser suspends this page.
+        markStarRedirect(storage, STAR_KEY, REPOSITORY_URL, Date.now());
+        if (typeof window.open === "function") {
+          window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
+        } else {
+          window.location.assign(REPOSITORY_URL);
+        }
+        return Promise.resolve(false);
+      }
+
       const protectedButtons = [validateButton, generateButton, ...fieldCheckButtons];
       const previousDisabled = protectedButtons.map((button) => button.disabled);
       protectedButtons.forEach((button) => { button.disabled = true; });
       starModal.hidden = false;
       starSpinner.hidden = false;
-      starMessage.textContent = state === "new"
-        ? "需要先给 SentinelRelay 仓库点击 Star，才能进行字段验证、API 验证或生成代码。这个流程只是本地提醒，不会向 GitHub 查询真实 Star 状态。"
-        : "我们记录到你之前已经打开过仓库。点击“我已验证”后，只放行本次操作；这里不会向 GitHub 查询真实 Star 状态。";
+      starMessage.textContent = "正在准备下一步…";
       starActions.replaceChildren();
 
       const promise = new Promise((resolve) => {
@@ -532,28 +645,12 @@
           starSpinner.hidden = true;
           const actionButton = document.createElement("button");
           actionButton.type = "button";
-          if (state === "new") {
-            actionButton.textContent = "立即跳转仓库";
-            actionButton.addEventListener("click", () => {
-              // The marker must be written before opening a new tab.
-              markStarRedirect(storage, STAR_KEY, REPOSITORY_URL, Date.now());
-              if (typeof window.open === "function") {
-                window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
-              } else {
-                window.location.assign(REPOSITORY_URL);
-              }
-              closeStarGate();
-              // The first redirect only records the reminder. The protected
-              // action stays blocked until a later click confirms “我已验证”.
-              resolve(false);
-            }, { once: true });
-          } else {
-            actionButton.textContent = "我已验证";
-            actionButton.addEventListener("click", () => {
-              closeStarGate();
-              resolve(true);
-            }, { once: true });
-          }
+          actionButton.textContent = "我已验证";
+          actionButton.addEventListener("click", () => {
+            markStarVerified(storage, STAR_KEY, Date.now());
+            closeStarGate();
+            resolve(true);
+          }, { once: true });
           starActions.append(actionButton);
           actionButton.focus();
         }, GATE_DELAY_MS);
@@ -571,6 +668,14 @@
         renderConfigErrors(config.errors);
         return null;
       }
+      setStatus(formStatus, "正在检查 Worker 地址是否可达…", "busy");
+      const worker = await runWorkerReachability(values);
+      if (!worker.ok) {
+        renderFieldError("APP_BASE_URL", worker.error);
+        setStatus(formStatus, `Worker 地址验证失败：${worker.error}`, "error");
+        return null;
+      }
+      renderFieldError("APP_BASE_URL", "");
       setStatus(formStatus, "正在向 Telegram 请求 getMe 和 getChat…", "busy");
       const telegram = await runTelegramValidation(values);
       if (!telegram.ok) {
@@ -591,6 +696,18 @@
       renderFieldError(name, localError);
       if (localError) {
         setStatus(formStatus, `${fieldLabel(name)}：${localError}`, "error");
+        return;
+      }
+
+      if (name === "APP_BASE_URL") {
+        setStatus(formStatus, "正在检查 Worker 地址是否可达…", "busy");
+        const worker = await runWorkerReachability(values);
+        if (!worker.ok) {
+          renderFieldError(name, worker.error);
+          setStatus(formStatus, `Worker 地址验证失败：${worker.error}`, "error");
+          return;
+        }
+        setStatus(formStatus, "Worker 地址可达。", "success");
         return;
       }
 
@@ -644,7 +761,7 @@
         const code = replaceWorkerPlaceholders(template, values);
         generatedCode.value = code;
         resultPanel.hidden = false;
-        setStatus(formStatus, "代码生成成功。请先在 Cloudflare 创建 D1（绑定名 DB），再粘贴并部署代码。", "success");
+        setStatus(formStatus, "代码生成成功。请复制完整代码，替换默认 Worker 的代码并重新部署；D1 继续使用绑定名 DB。", "success");
         resultPanel.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (error) {
         resultPanel.hidden = true;
@@ -679,6 +796,24 @@
       input?.addEventListener("blur", () => renderFieldError(name, validateDeployField(name, input.value)));
     });
 
+    restorePersistedConfig();
+    CONFIG_FIELDS.forEach((name) => {
+      fieldInput(name)?.addEventListener("input", () => persistConfig());
+      fieldInput(name)?.addEventListener("change", () => persistConfig());
+    });
+
+    wizardTitle?.addEventListener("click", () => {
+      resetClickCount += 1;
+      if (resetClickTimer) window.clearTimeout(resetClickTimer);
+      resetClickTimer = window.setTimeout(() => { resetClickCount = 0; }, RESET_CLICK_WINDOW_MS);
+      if (resetClickCount >= RESET_CLICK_COUNT) {
+        resetClickCount = 0;
+        window.clearTimeout(resetClickTimer);
+        resetClickTimer = null;
+        clearGatePersistence();
+      }
+    });
+
     copyButton.addEventListener("click", async () => {
       if (!generatedCode.value) return;
       copyButton.disabled = true;
@@ -701,8 +836,9 @@
       setStatus(formStatus, "已清空页面内存中的生成结果。", "");
     });
 
-    // Expose only non-persistent helpers for browser smoke tests and embeds.
+    // Expose only validation/copy helpers for browser smoke tests and embeds.
     window.runTelegramValidation = runTelegramValidation;
+    window.runWorkerReachability = runWorkerReachability;
     window.validateDeployField = validateDeployField;
     window.copyGeneratedWorker = copyGeneratedWorker;
 

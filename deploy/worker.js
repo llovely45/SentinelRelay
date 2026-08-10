@@ -2870,7 +2870,11 @@ export async function handleRequest(request, env = {}, ctx = {}) {
     if (method !== "GET") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
     return new Response("SentinelRelay Worker is running", {
       status: 200,
-      headers: { "Content-Type": "text/plain; charset=utf-8" }
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store"
+      }
     });
   }
 

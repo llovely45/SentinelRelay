@@ -5,6 +5,7 @@
 worker.generated.js
 
 # Local Cloudflare state
+.wrangler/cache/
 .wrangler/state/
 .d1/
 d1/
@@ -13,6 +14,7 @@ d1/
 
 # Local tooling and OS files
 .worktrees/
+.pages-dist/
 .idea/
 .vscode/
 .DS_Store
