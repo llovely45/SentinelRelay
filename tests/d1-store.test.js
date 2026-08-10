@@ -149,3 +149,39 @@ test("fake D1 rejects a prepared statement with an unbound value", async () => {
   const db = createFakeD1();
   await assert.rejects(() => db.prepare("SELECT ?").first(), /unbound value/);
 });
+
+test("expired sessions are not pending and cannot be consumed", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 10, first_name: "Expired" });
+  const session = await store.createVerificationSession(10, -1);
+
+  assert.equal((await store.getSession(session.session_id)).status, "expired");
+  assert.equal(await store.getLatestPendingSessionForUser(10), null);
+  assert.equal(await store.markVerified(10, 2000, session.session_id), null);
+  assert.equal((await store.getUser(10)).is_verified, 0);
+});
+
+test("markVerified consumes a session exactly once under concurrent attempts", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 11, first_name: "Single use" });
+  const session = await store.createVerificationSession(11, 30);
+
+  const results = await Promise.all([
+    store.markVerified(11, 3001, session.session_id),
+    store.markVerified(11, 3002, session.session_id)
+  ]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal((await store.getSession(session.session_id)).status, "passed");
+  assert.equal([3001, 3002].includes((await store.getUser(11)).topic_thread_id), true);
+  assert.equal(await store.markVerified(11, 3999, session.session_id), null);
+  assert.notEqual((await store.getUser(11)).topic_thread_id, 3999);
+});
+
+test("null topic thread lookups follow SQL NULL semantics", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 12, first_name: "No thread" });
+  assert.equal(await store.getUserByThreadId(null), null);
+});

@@ -70,7 +70,12 @@ export function createFakeD1() {
   };
 
   function findUserByThread(threadId) {
-    return [...users.values()].find((row) => String(row.topic_thread_id) === String(threadId)) || null;
+    // SQL's `column = NULL` is UNKNOWN, never true.  Do not let the string
+    // representation of two nullish values accidentally match a user row.
+    if (threadId === null || threadId === undefined) return null;
+    return [...users.values()].find((row) => row.topic_thread_id !== null
+      && row.topic_thread_id !== undefined
+      && String(row.topic_thread_id) === String(threadId)) || null;
   }
 
   function execute(sql, params, mode) {
@@ -125,10 +130,22 @@ export function createFakeD1() {
 
     if (lower.startsWith("update users set")) {
       let changed = 0;
-      const userId = params[params.length - 1];
+      const isVerificationTransition = lower.includes("is_verified = 1") && lower.includes("topic_thread_id = ?");
+      const userId = isVerificationTransition ? params[2] : params[params.length - 1];
       const row = users.get(String(userId));
       if (!row) return runResult(0);
-      if (lower.includes("is_verified = 1") && lower.includes("topic_thread_id = ?")) {
+      if (isVerificationTransition) {
+        if (lower.includes("is_verified = 0") && Number(row.is_verified) !== 0) {
+          return runResult(0);
+        }
+        if (lower.includes("exists (")) {
+          const session = sessions.get(String(params[3]));
+          const expectedConsumedAt = params[5];
+          if (!session || String(session.user_id) !== String(params[4])
+            || session.status !== "passed" || String(session.consumed_at) !== String(expectedConsumedAt)) {
+            return runResult(0);
+          }
+        }
         row.is_verified = 1;
         row.is_blacklisted = 0;
         row.topic_thread_id = params[0];
@@ -217,6 +234,10 @@ export function createFakeD1() {
 
     if (lower.startsWith("select * from verification_sessions")) {
       let found = [...sessions.values()].filter((row) => String(row.user_id) === String(params[0]) && row.status === "pending");
+      if (lower.includes("expires_at > ?")) {
+        const now = Date.parse(String(params[1]));
+        found = found.filter((row) => Date.parse(String(row.expires_at)) > now);
+      }
       found.sort((left, right) => compareDesc(left.created_at, right.created_at));
       found = found.slice(0, 1);
       return mode === "first" ? clone(found[0] || null) : rowsResult(found);
@@ -229,6 +250,14 @@ export function createFakeD1() {
       const row = sessions.get(String(sessionId));
       if (!row || String(row.user_id) !== String(userId) || (lower.includes("status = 'pending'") && row.status !== "pending")) {
         return runResult(0);
+      }
+      if (!isFailed && lower.includes("expires_at > ?")
+        && Date.parse(String(row.expires_at)) <= Date.parse(String(params[3]))) {
+        return runResult(0);
+      }
+      if (!isFailed && lower.includes("from users where user_id")) {
+        const user = users.get(String(params[4]));
+        if (!user || Number(user.is_verified) !== 0) return runResult(0);
       }
       if (isFailed) {
         row.status = "failed";
@@ -401,9 +430,11 @@ export function createFakeD1() {
     },
     prepare,
     async batch(statements) {
-      const results = [];
-      for (const statement of statements) results.push(await statement.run());
-      return results;
+      // Each statement's async body executes synchronously before its Promise
+      // is returned. Starting the whole batch without yielding between
+      // statements prevents a second fake transaction from observing the
+      // first half of this transaction.
+      return Promise.all(statements.map((statement) => statement.run()));
     }
   };
 }

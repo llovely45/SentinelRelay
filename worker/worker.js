@@ -57,8 +57,7 @@ CREATE TABLE IF NOT EXISTS fingerprint_labels (
   created_by_user_id INTEGER NOT NULL,
   is_blocked INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  FOREIGN KEY(source_user_id) REFERENCES users(user_id),
-  FOREIGN KEY(created_by_user_id) REFERENCES users(user_id)
+  FOREIGN KEY(source_user_id) REFERENCES users(user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_fingerprint_labels_source_user
   ON fingerprint_labels(source_user_id, created_at);
@@ -413,6 +412,11 @@ function normalizePage(value, fallback) {
   return Number.isFinite(number) && number >= 1 ? Math.max(1, Math.floor(number)) : fallback;
 }
 
+function isExpiredTimestamp(value, now = Date.now()) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= now;
+}
+
 function hydrateUser(row) {
   if (!row) return null;
   const result = { ...row };
@@ -504,7 +508,7 @@ export function createStore(db) {
   }
 
   async function getSession(sessionId) {
-    return first(`
+    const session = await first(`
       SELECT vs.*, u.username, u.first_name, u.last_name, u.language_code,
         u.is_verified, u.is_blacklisted, u.topic_thread_id,
         u.latest_fingerprint_id, u.latest_fingerprint_payload,
@@ -514,15 +518,22 @@ export function createStore(db) {
       WHERE vs.session_id = ?
       LIMIT 1
     `, sessionId);
+    if (session?.status === "pending" && isExpiredTimestamp(session.expires_at)) {
+      // Keep the row available to callers that need to render a 410 response,
+      // but make it impossible to mistake an expired pending row for a usable
+      // session at the repository boundary.
+      return { ...session, status: "expired" };
+    }
+    return session;
   }
 
   async function getLatestPendingSessionForUser(userId) {
     return first(`
       SELECT * FROM verification_sessions
-      WHERE user_id = ? AND status = 'pending'
+      WHERE user_id = ? AND status = 'pending' AND expires_at > ?
       ORDER BY created_at DESC
       LIMIT 1
-    `, userId);
+    `, userId, new Date().toISOString());
   }
 
   async function setVerificationPrompt(userId, chatId, messageId) {
@@ -563,22 +574,29 @@ export function createStore(db) {
   }
 
   async function markVerified(userId, threadId, sessionId) {
-    const session = await getSession(sessionId);
-    if (!session || String(session.user_id) !== String(userId) || session.status !== "pending") return getUser(userId);
     const now = new Date().toISOString();
-    await db.batch([
+    const results = await db.batch([
+      db.prepare(`
+        UPDATE verification_sessions
+        SET status = 'passed', consumed_at = ?
+        WHERE session_id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?
+          AND EXISTS (
+            SELECT 1 FROM users WHERE user_id = ? AND is_verified = 0
+          )
+      `).bind(now, sessionId, userId, now, userId),
       db.prepare(`
         UPDATE users
         SET is_verified = 1, is_blacklisted = 0, topic_thread_id = ?,
           verification_prompt_chat_id = NULL, verification_prompt_message_id = NULL, updated_at = ?
-        WHERE user_id = ?
-      `).bind(threadId, now, userId),
-      db.prepare(`
-        UPDATE verification_sessions
-        SET status = 'passed', consumed_at = ?
-        WHERE session_id = ? AND user_id = ? AND status = 'pending'
-      `).bind(now, sessionId, userId)
+        WHERE user_id = ? AND is_verified = 0 AND EXISTS (
+          SELECT 1 FROM verification_sessions
+          WHERE session_id = ? AND user_id = ? AND status = 'passed' AND consumed_at = ?
+        )
+      `).bind(threadId, now, userId, sessionId, userId, now)
     ]);
+    const sessionChanged = Number(results?.[0]?.meta?.changes || 0);
+    const userChanged = Number(results?.[1]?.meta?.changes || 0);
+    if (sessionChanged !== 1 || userChanged !== 1) return null;
     return getUser(userId);
   }
 
