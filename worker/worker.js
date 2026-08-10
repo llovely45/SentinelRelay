@@ -1025,16 +1025,17 @@ export async function handleVerificationRequest(
       ...(currentUser || session || {}),
       ...(verifiedUser || {})
     };
-    if (typeof telegram?.sendMessage === "function") {
-      if (groupId !== "") {
-        await telegram.sendMessage(groupId, [
-          telegramUserInfo(userForNotice),
-          `指纹: ${fingerprintMeta.id}`,
-          `公网 IP: ${fingerprintMeta.publicIpInfo?.ip || "无"}`
-        ].join("\n"), { message_thread_id: numericThreadId });
-      }
-      await notifyTelegram(telegram, session.user_id, "验证成功，请回到 Telegram 继续聊天。", {});
-    }
+    await notifyTelegramGroup(
+      telegram,
+      groupId,
+      [
+        telegramUserInfo(userForNotice),
+        `指纹: ${fingerprintMeta.id}`,
+        `公网 IP: ${fingerprintMeta.publicIpInfo?.ip || "无"}`
+      ].join("\n"),
+      { message_thread_id: numericThreadId }
+    );
+    await notifyTelegram(telegram, session.user_id, "验证成功，请回到 Telegram 继续聊天。", {});
     return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
   } catch {
     if (!marked) await deleteCreatedTopic();

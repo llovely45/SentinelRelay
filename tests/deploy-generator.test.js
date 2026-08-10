@@ -59,6 +59,22 @@ test("validateDeployConfig accepts only an HTTPS origin for APP_BASE_URL", () =>
   assert.equal(validateDeployConfig(config).ok, true);
 });
 
+test("validateDeployConfig rejects HTTPS origins containing userinfo", () => {
+  const config = {
+    TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE",
+    TG_GROUP_ID: "-100123",
+    APP_BASE_URL: "https://user:password@worker.example",
+    TURNSTILE_SITE_KEY: "site-key",
+    TURNSTILE_SECRET_KEY: "secret-key",
+    TG_WEBHOOK_SECRET: "a-webhook-secret-long-enough",
+    VERIFICATION_TTL_MINUTES: "30",
+    STUN_SERVER_URL: "stun:stun.example:3478"
+  };
+  const result = validateDeployConfig(config);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.errors, ["APP_BASE_URL 必须使用 HTTPS 且不能带末尾斜杠"]);
+});
+
 test("validateDeployConfig enforces Telegram webhook secret characters and length", () => {
   const config = {
     TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE",

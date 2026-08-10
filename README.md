@@ -24,6 +24,9 @@ SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信
 4. 部署后，用浏览器打开一次 `https://你的-worker-域名/health`。该请求会初始化 D1 表和索引，并按 Worker 地址及 Webhook Secret 注册 Telegram Webhook；以后也可用它检查健康状态。
 5. Telegram 会向 `https://你的-worker-域名/telegram/webhook` 发送更新。Worker 要求请求包含与生成配置一致的 `X-Telegram-Bot-Api-Secret-Token`（即 `TG_WEBHOOK_SECRET`）；修改域名或 Secret 后再次打开 `/health` 以更新 Webhook。
 
+这是当前 Worker 模板的最终 D1 表结构。若你曾部署过早期测试版（其中
+`processed_telegram_updates` 只有 `update_id` 主键），请在切换到本模板前备份并删除该旧表，或创建一个新的 D1 数据库，再打开 `/health` 重新初始化；`CREATE TABLE IF NOT EXISTS` 不会自动把旧表升级为新的 `(bot_namespace, update_id)` 复合主键。
+
 ## 生成配置字段
 
 部署页会在浏览器内校验并替换以下全部字段。值不会上传到本仓库服务器、URL、`localStorage` 或下载文件；Telegram 的 `getMe`/`getChat` 校验直接从浏览器请求 Telegram API。

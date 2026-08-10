@@ -28,6 +28,8 @@ python3 -m http.server 8000
 3. 部署 Worker 后，打开一次 `https://你的域名/health`。这会初始化 D1，并按当前地址和密钥注册 Telegram Webhook；以后可用该地址检查健康状态。
 4. 将 Telegram Bot 的 Webhook 请求指向 Worker 自动注册的 `/telegram/webhook`。如果修改 Worker 地址或 Webhook Secret，请再次打开 `/health`。
 
+升级提示：本模板使用 `processed_telegram_updates(bot_namespace, update_id)` 复合主键。若 D1 中已有早期测试版创建的同名旧表（只有 `update_id` 主键），请先备份并删除该表，或改用新的 D1 数据库，再访问 `/health`；D1 的 `CREATE TABLE IF NOT EXISTS` 不会自动迁移旧表结构。
+
 ## 4. 安全提醒
 
 - 这是浏览器端生成器，不是远程部署服务；凭据不会发送到本仓库服务器。Telegram `getMe`/`getChat` 请求从浏览器直接发送到 `api.telegram.org`。

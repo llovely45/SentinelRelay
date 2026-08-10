@@ -538,7 +538,7 @@ test("successful verification deletes its saved prompt best-effort", async () =>
   assert.deepEqual(deleted, [[44, 9]]);
 });
 
-test("group notification failure returns a generic error without leaking details", async () => {
+test("group notification failure does not undo a committed verification", async () => {
   const user = { user_id: 46, first_name: "Telegram error", is_verified: 0, is_blacklisted: 0 };
   const session = { session_id: "telegram-error", user_id: 46, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
   let marked = false;
@@ -561,7 +561,7 @@ test("group notification failure returns a generic error without leaking details
       async sendMessage() { throw new Error("telegram secret detail"); }
     }
   });
-  assert.equal(response.status, 500);
+  assert.equal(response.status, 200);
   assert.equal(marked, true);
   assert.doesNotMatch(await response.text(), /telegram secret detail/);
 });
