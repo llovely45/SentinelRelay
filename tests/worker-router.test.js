@@ -71,6 +71,35 @@ test("a persisted webhook digest change overrides the isolate cache", async () =
   assert.equal(reads, 2);
 });
 
+test("rotating the bot token re-registers the webhook without persisting the raw token", async () => {
+  const env = {
+    DB: {},
+    APP_BASE_URL: "https://worker.example",
+    TG_WEBHOOK_SECRET: "a-webhook-secret-long-enough",
+    TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE"
+  };
+  const calls = [];
+  let persisted = null;
+  const store = {
+    async getRuntimeSetting() { return persisted; },
+    async setRuntimeSetting(_key, value) { persisted = value; }
+  };
+  const telegram = {
+    async setWebhook(...args) { calls.push(args); return true; }
+  };
+  const request = new Request("https://worker.example/health");
+
+  await ensureWebhook(env, request, store, telegram);
+  const firstDigest = persisted;
+  env.TG_BOT_TOKEN = "987654:zyxwvutsrqponmlkjihgfedcbaABCDE";
+  await ensureWebhook(env, request, store, telegram);
+
+  assert.equal(calls.length, 2);
+  assert.notEqual(persisted, firstDigest);
+  assert.doesNotMatch(String(persisted), /123456:abcdefghijklmnopqrstuvwxyzABCDE/);
+  assert.doesNotMatch(String(persisted), /987654:zyxwvutsrqponmlkjihgfedcbaABCDE/);
+});
+
 test("verification page routes reject POST without invoking validation", async () => {
   let turnstileCalls = 0;
   const env = createTestEnv({

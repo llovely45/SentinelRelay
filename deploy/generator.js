@@ -45,7 +45,11 @@ function isHttpsUrlWithoutTrailingSlash(value) {
   }
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && Boolean(url.hostname);
+    return url.protocol === "https:"
+      && Boolean(url.hostname)
+      && url.pathname === "/"
+      && url.search === ""
+      && url.hash === "";
   } catch {
     return false;
   }
@@ -90,7 +94,8 @@ export function validateDeployConfig(values = {}) {
     errors.push(CONFIG_ERRORS.TURNSTILE_SECRET_KEY);
   }
 
-  if (typeof input.TG_WEBHOOK_SECRET !== "string" || input.TG_WEBHOOK_SECRET.length < 16) {
+  if (typeof input.TG_WEBHOOK_SECRET !== "string"
+    || !/^[A-Za-z0-9_-]{16,256}$/.test(input.TG_WEBHOOK_SECRET)) {
     errors.push(CONFIG_ERRORS.TG_WEBHOOK_SECRET);
   }
 

@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   value TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS processed_telegram_updates (
+  update_id INTEGER PRIMARY KEY,
+  status TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_processed_telegram_updates_expiry
+  ON processed_telegram_updates(status, lease_expires_at);
 `;
 
 function normalizeString(value) {
@@ -602,6 +613,61 @@ function detectClientSystem(request) {
   return "未知";
 }
 
+const MAX_WEBRTC_INPUT_BYTES = 4096;
+const MAX_WEBRTC_IP_COUNT = 8;
+const MAX_FINGERPRINT_PAYLOAD_BYTES = 64 * 1024;
+const MAX_FINGERPRINT_FIELD_BYTES = 4096;
+const MAX_FINGERPRINT_DEPTH = 8;
+const MAX_FINGERPRINT_KEYS_PER_OBJECT = 128;
+const MAX_TURNSTILE_TOKEN_BYTES = 4096;
+
+class VerificationInputError extends Error {
+  constructor(message, status = 413) {
+    super(message);
+    this.name = "VerificationInputError";
+    this.status = status;
+  }
+}
+
+function utf8ByteLength(value) {
+  return textEncoder.encode(String(value ?? "")).byteLength;
+}
+
+function assertFingerprintValueWithinBounds(value, depth = 0) {
+  if (depth > MAX_FINGERPRINT_DEPTH) {
+    throw new VerificationInputError("fingerprint_depth");
+  }
+  if (typeof value === "string") {
+    if (utf8ByteLength(value) > MAX_FINGERPRINT_FIELD_BYTES) {
+      throw new VerificationInputError("fingerprint_field");
+    }
+    return;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new VerificationInputError("fingerprint_number", 400);
+    return;
+  }
+  if (value === null || typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_FINGERPRINT_KEYS_PER_OBJECT) {
+      throw new VerificationInputError("fingerprint_array");
+    }
+    for (const item of value) assertFingerprintValueWithinBounds(item, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") throw new VerificationInputError("fingerprint_type", 400);
+  const keys = Object.keys(value);
+  if (keys.length > MAX_FINGERPRINT_KEYS_PER_OBJECT) {
+    throw new VerificationInputError("fingerprint_object");
+  }
+  for (const key of keys) {
+    if (utf8ByteLength(key) > MAX_FINGERPRINT_FIELD_BYTES) {
+      throw new VerificationInputError("fingerprint_key");
+    }
+    assertFingerprintValueWithinBounds(value[key], depth + 1);
+  }
+}
+
 async function readVerificationForm(request) {
   const contentType = requestHeader(request, "content-type").toLowerCase();
   try {
@@ -623,13 +689,42 @@ async function readVerificationForm(request) {
 
 function parseFingerprintPayload(value) {
   if (!value) return {};
-  if (typeof value === "object") return value;
+  let raw = value;
+  if (typeof value === "object") {
+    try { raw = JSON.stringify(value); } catch { throw new VerificationInputError("fingerprint_json", 400); }
+  }
+  if (utf8ByteLength(raw) > MAX_FINGERPRINT_PAYLOAD_BYTES) {
+    throw new VerificationInputError("fingerprint_payload");
+  }
+  if (typeof value === "object") {
+    if (Array.isArray(value)) throw new VerificationInputError("fingerprint_type", 400);
+    assertFingerprintValueWithinBounds(value);
+    return value;
+  }
   try {
     const parsed = JSON.parse(String(value));
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new VerificationInputError("fingerprint_type", 400);
+    }
+    assertFingerprintValueWithinBounds(parsed);
+    return parsed;
+  } catch (error) {
+    if (error instanceof VerificationInputError) throw error;
+    throw new VerificationInputError("fingerprint_json", 400);
   }
+}
+
+function validateVerificationInput(form = {}) {
+  const rawWebrtc = form.webrtc_ip ?? form.webrtc_ips ?? form.webrtcIp ?? "";
+  if (utf8ByteLength(rawWebrtc) > MAX_WEBRTC_INPUT_BYTES) {
+    throw new VerificationInputError("webrtc_payload");
+  }
+  const webrtcIps = normalizePublicIpList(rawWebrtc);
+  if (webrtcIps.length > MAX_WEBRTC_IP_COUNT) {
+    throw new VerificationInputError("webrtc_ip_count");
+  }
+  const fingerprint = parseFingerprintPayload(form.fingerprint_payload || form.fingerprint || "");
+  return { webrtcIps, fingerprint };
 }
 
 function pageErrorResponse(options = {}, status = 400) {
@@ -741,9 +836,22 @@ export async function handleVerificationRequest(
   }
 
   const form = preReadForm || await readVerificationForm(request);
+  let boundedInput;
+  try {
+    boundedInput = validateVerificationInput(form);
+  } catch (error) {
+    const status = error instanceof VerificationInputError ? error.status : 400;
+    const message = status === 413
+      ? "验证数据过大，请缩减后重试。"
+      : "验证数据格式无效，请重试。";
+    return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: message }, status);
+  }
   const token = normalizeString(form["cf-turnstile-response"] || form.turnstile_token || form.token);
   if (!token) {
     return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "缺少 Turnstile 验证结果，请重试。" }, 400);
+  }
+  if (utf8ByteLength(token) > MAX_TURNSTILE_TOKEN_BYTES) {
+    return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "验证数据过大，请缩减后重试。" }, 413);
   }
 
   const remoteIp = requestClientIp(request);
@@ -788,7 +896,7 @@ export async function handleVerificationRequest(
     try { await telegram.deleteForumTopic(groupId, numericThreadId); } catch {}
   };
   try {
-    const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
+    const { webrtcIps, fingerprint } = boundedInput;
     const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
     const metadataFetch = env.IP_METADATA_FETCH || env.fetchImpl || globalThis.fetch;
     const metadataTimeoutMs = configValue(env, ["IP_METADATA_TIMEOUT_MS", "ipMetadataTimeoutMs"], 3000);
@@ -802,7 +910,6 @@ export async function handleVerificationRequest(
     const publicIpInfo = remoteIp
       ? (metadataByIp.get(remoteIp) || { ip: remoteIp, asn: "", organization: "" })
       : null;
-    const fingerprint = parseFingerprintPayload(form.fingerprint_payload || form.fingerprint || "");
     const fingerprintMeta = await buildFingerprintMeta({
       system: detectClientSystem(request),
       publicIpInfo,
@@ -1564,6 +1671,66 @@ export function createStore(db) {
     return getRuntimeSetting(key);
   }
 
+  /**
+   * Atomically claim a Telegram update ID for at-most-once processing while
+   * retaining a bounded lease so a crashed Worker can be recovered safely.
+   */
+  async function claimTelegramUpdate(updateId, leaseMs = 300_000) {
+    if (updateId === null || updateId === undefined || String(updateId).trim() === "") {
+      return { claimed: false, completed: false };
+    }
+    const normalizedId = String(updateId);
+    const now = new Date().toISOString();
+    const requestedLease = Number(leaseMs);
+    const safeLease = Number.isFinite(requestedLease) && requestedLease > 0
+      ? Math.min(requestedLease, 5 * 60 * 1000)
+      : 300_000;
+    const leaseExpiresAt = new Date(Date.now() + safeLease).toISOString();
+    const leaseToken = randomUuid();
+    const inserted = await run(`
+      INSERT INTO processed_telegram_updates
+        (update_id, status, lease_token, lease_expires_at, created_at, completed_at)
+      VALUES (?, 'processing', ?, ?, ?, NULL)
+      ON CONFLICT(update_id) DO NOTHING
+    `, normalizedId, leaseToken, leaseExpiresAt, now);
+    if (Number(inserted?.meta?.changes || 0) === 1) {
+      return { claimed: true, completed: false, leaseToken, lease_token: leaseToken };
+    }
+
+    const takeover = await run(`
+      UPDATE processed_telegram_updates
+      SET status = 'processing', lease_token = ?, lease_expires_at = ?, created_at = ?, completed_at = NULL
+      WHERE update_id = ? AND status = 'processing' AND lease_expires_at <= ?
+    `, leaseToken, leaseExpiresAt, now, normalizedId, now);
+    if (Number(takeover?.meta?.changes || 0) === 1) {
+      return { claimed: true, completed: false, leaseToken, lease_token: leaseToken };
+    }
+    const row = await first(`
+      SELECT status FROM processed_telegram_updates WHERE update_id = ? LIMIT 1
+    `, normalizedId);
+    return { claimed: false, completed: row?.status === "completed" };
+  }
+
+  async function completeTelegramUpdate(updateId, leaseToken) {
+    if (updateId === null || updateId === undefined || !leaseToken) return false;
+    const now = new Date().toISOString();
+    const result = await run(`
+      UPDATE processed_telegram_updates
+      SET status = 'completed', completed_at = ?, lease_expires_at = ?
+      WHERE update_id = ? AND status = 'processing' AND lease_token = ?
+    `, now, now, String(updateId), String(leaseToken));
+    return Number(result?.meta?.changes || 0) === 1;
+  }
+
+  async function releaseTelegramUpdate(updateId, leaseToken) {
+    if (updateId === null || updateId === undefined || !leaseToken) return false;
+    const result = await run(`
+      DELETE FROM processed_telegram_updates
+      WHERE update_id = ? AND status = 'processing' AND lease_token = ?
+    `, String(updateId), String(leaseToken));
+    return Number(result?.meta?.changes || 0) === 1;
+  }
+
   return {
     ensureSchema,
     upsertTelegramUser,
@@ -1598,7 +1765,10 @@ export function createStore(db) {
     deletePendingAdminAction,
     consumePendingAdminAction,
     getRuntimeSetting,
-    setRuntimeSetting
+    setRuntimeSetting,
+    claimTelegramUpdate,
+    completeTelegramUpdate,
+    releaseTelegramUpdate
   };
 }
 
@@ -1976,7 +2146,7 @@ function isAdminMember(member) {
  * read from D1; no in-memory map is used, which keeps retries safe across
  * stateless Worker instances.
  */
-export async function processTelegramUpdate(update, { config = {}, store, telegram } = {}) {
+async function processTelegramUpdateCore(update, { config = {}, store, telegram } = {}) {
   if (!store || !telegram) throw new TypeError("store and telegram are required");
   const runtime = runtimeTelegramConfig(config);
   const groupId = runtime.groupId;
@@ -2380,6 +2550,46 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
   await telegram.copyMessage(user.user_id, groupId, message.message_id);
 }
 
+/**
+ * Claim Telegram's update_id before running side effects.  Completed updates
+ * are acknowledged as duplicates, while failed updates release their lease
+ * so Telegram retries can safely run again.
+ */
+export async function processTelegramUpdate(update, options = {}) {
+  const { store } = options;
+  if (!store || !options.telegram) throw new TypeError("store and telegram are required");
+  const updateId = update?.update_id;
+  const trackable = updateId !== null && updateId !== undefined
+    && String(updateId).trim() !== ""
+    && typeof store.claimTelegramUpdate === "function";
+  let claim = null;
+  if (trackable) {
+    claim = await store.claimTelegramUpdate(updateId);
+    if (!claim?.claimed) {
+      return {
+        skipped: true,
+        duplicate: Boolean(claim?.completed),
+        update_id: updateId
+      };
+    }
+  }
+
+  try {
+    const result = await processTelegramUpdateCore(update, options);
+    if (claim?.claimed && typeof store.completeTelegramUpdate === "function") {
+      await store.completeTelegramUpdate(updateId, claim.leaseToken || claim.lease_token);
+    }
+    return result;
+  } catch (error) {
+    if (claim?.claimed && typeof store.releaseTelegramUpdate === "function") {
+      try {
+        await store.releaseTelegramUpdate(updateId, claim.leaseToken || claim.lease_token);
+      } catch {}
+    }
+    throw error;
+  }
+}
+
 const WEBHOOK_PATH = "/telegram/webhook";
 const WEBHOOK_DIGEST_KEY = "webhook_digest";
 
@@ -2540,7 +2750,11 @@ export async function ensureWebhook(env = {}, request, store, telegram) {
   const configuredBase = normalizeString(configValue(env, ["APP_BASE_URL", "appBaseUrl", "app_base_url"], ""));
   const baseUrl = (configuredBase || requestOrigin(request)).replace(/\/+$/, "");
   const secret = String(configValue(env, ["TG_WEBHOOK_SECRET", "tgWebhookSecret", "webhookSecret"], ""));
-  const digest = await sha256Hex(`${baseUrl}${WEBHOOK_PATH}${secret}`);
+  // Include only a one-way token digest so rotating Bot credentials forces a
+  // fresh Telegram registration without ever persisting the raw token in D1.
+  const botToken = String(configValue(env, ["TG_BOT_TOKEN", "tgBotToken", "botToken", "token"], ""));
+  const botTokenDigest = await sha256Hex(botToken);
+  const digest = await sha256Hex([baseUrl, WEBHOOK_PATH, secret, botTokenDigest].join("\n"));
   const persisted = await store.getRuntimeSetting(WEBHOOK_DIGEST_KEY);
   if (persisted === digest) {
     if (env?.DB && typeof env.DB === "object") webhookDigestCache.set(env.DB, digest);

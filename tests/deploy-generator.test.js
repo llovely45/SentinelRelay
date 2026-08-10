@@ -35,3 +35,49 @@ test("validateDeployConfig rejects invalid URL, group and secret", () => {
     "STUN_SERVER_URL 必须以 stun: 开头"
   ]);
 });
+
+test("validateDeployConfig accepts only an HTTPS origin for APP_BASE_URL", () => {
+  const config = {
+    TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE",
+    TG_GROUP_ID: "-100123",
+    APP_BASE_URL: "https://worker.example",
+    TURNSTILE_SITE_KEY: "site-key",
+    TURNSTILE_SECRET_KEY: "secret-key",
+    TG_WEBHOOK_SECRET: "a-webhook-secret-long-enough",
+    VERIFICATION_TTL_MINUTES: "30",
+    STUN_SERVER_URL: "stun:stun.example:3478"
+  };
+  for (const value of [
+    "https://worker.example/path",
+    "https://worker.example?next=/path",
+    "https://worker.example#fragment"
+  ]) {
+    const result = validateDeployConfig({ ...config, APP_BASE_URL: value });
+    assert.equal(result.ok, false, value);
+    assert.deepEqual(result.errors, ["APP_BASE_URL 必须使用 HTTPS 且不能带末尾斜杠"], value);
+  }
+  assert.equal(validateDeployConfig(config).ok, true);
+});
+
+test("validateDeployConfig enforces Telegram webhook secret characters and length", () => {
+  const config = {
+    TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE",
+    TG_GROUP_ID: "-100123",
+    APP_BASE_URL: "https://worker.example",
+    TURNSTILE_SITE_KEY: "site-key",
+    TURNSTILE_SECRET_KEY: "secret-key",
+    TG_WEBHOOK_SECRET: "a-webhook-secret-long-enough",
+    VERIFICATION_TTL_MINUTES: "30",
+    STUN_SERVER_URL: "stun:stun.example:3478"
+  };
+  for (const value of [
+    "secret with spaces",
+    "secret.with.punctuation",
+    "x".repeat(257)
+  ]) {
+    const result = validateDeployConfig({ ...config, TG_WEBHOOK_SECRET: value });
+    assert.equal(result.ok, false, value);
+    assert.deepEqual(result.errors, ["TG_WEBHOOK_SECRET 至少需要 16 个字符"], value);
+  }
+  assert.equal(validateDeployConfig({ ...config, TG_WEBHOOK_SECRET: "A-z_09-123456789" }).ok, true);
+});

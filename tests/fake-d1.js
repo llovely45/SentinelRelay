@@ -58,6 +58,7 @@ export function createFakeD1() {
   const labels = new Map();
   const pending = new Map();
   const runtime = new Map();
+  const processedUpdates = new Map();
   let nextLabelId = 1;
   const state = {
     users,
@@ -65,6 +66,7 @@ export function createFakeD1() {
     fingerprint_labels: labels,
     pending_admin_actions: pending,
     runtime_settings: runtime,
+    processed_telegram_updates: processedUpdates,
     schemaExecutions: 0,
     queries: []
   };
@@ -406,6 +408,59 @@ export function createFakeD1() {
     if (lower.startsWith("delete from pending_admin_actions")) {
       const changed = pending.delete(`${params[0]}:${params[1]}`) ? 1 : 0;
       return runResult(changed);
+    }
+
+    if (lower.startsWith("insert into processed_telegram_updates")) {
+      const [updateId, leaseToken, leaseExpiresAt, createdAt] = params;
+      const key = String(updateId);
+      if (processedUpdates.has(key)) return runResult(0);
+      processedUpdates.set(key, {
+        update_id: updateId,
+        status: "processing",
+        lease_token: leaseToken,
+        lease_expires_at: leaseExpiresAt,
+        created_at: createdAt,
+        completed_at: null
+      });
+      return runResult(1);
+    }
+
+    if (lower.startsWith("update processed_telegram_updates set")) {
+      if (lower.includes("status = 'completed'")) {
+        const row = processedUpdates.get(String(params[2]));
+        if (!row || row.status !== "processing" || String(row.lease_token) !== String(params[3])) {
+          return runResult(0);
+        }
+        row.status = "completed";
+        row.completed_at = params[0];
+        row.lease_expires_at = params[1];
+        return runResult(1);
+      }
+      const row = processedUpdates.get(String(params[3]));
+      if (!row || row.status !== "processing"
+        || Date.parse(String(row.lease_expires_at)) > Date.parse(String(params[4]))) {
+        return runResult(0);
+      }
+      row.status = "processing";
+      row.lease_token = params[0];
+      row.lease_expires_at = params[1];
+      row.created_at = params[2];
+      row.completed_at = null;
+      return runResult(1);
+    }
+
+    if (lower.startsWith("select status from processed_telegram_updates")) {
+      const row = processedUpdates.get(String(params[0]));
+      return mode === "first" ? clone(row || null) : rowsResult(row ? [row] : []);
+    }
+
+    if (lower.startsWith("delete from processed_telegram_updates")) {
+      const row = processedUpdates.get(String(params[0]));
+      if (!row || row.status !== "processing" || String(row.lease_token) !== String(params[1])) {
+        return runResult(0);
+      }
+      processedUpdates.delete(String(params[0]));
+      return runResult(1);
     }
 
     if (lower.startsWith("insert into runtime_settings")) {

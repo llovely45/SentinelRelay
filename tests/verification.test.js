@@ -17,6 +17,21 @@ function responseJson(payload, status = 200) {
   });
 }
 
+function pendingVerificationStore() {
+  return {
+    async getSession() {
+      return {
+        session_id: "session-input-limit",
+        user_id: 42,
+        status: "pending",
+        expires_at: "2099-01-01T00:00:00.000Z",
+        is_blacklisted: 0,
+        is_verified: 0
+      };
+    }
+  };
+}
+
 test("Turnstile verifier posts form data and returns the provider response", async () => {
   const calls = [];
   const result = await verifyTurnstile({
@@ -168,6 +183,72 @@ test("metadata timeout returns null without waiting for an unbounded fetch", asy
     async json() { return new Promise(() => {}); }
   }), { timeoutMs: 5 });
   assert.equal(jsonResult, null);
+});
+
+test("verification rejects oversized raw WebRTC input before Turnstile", async () => {
+  let turnstileCalls = 0;
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({
+      "cf-turnstile-response": "token",
+      webrtc_ip: "8.8.8.8," + "x".repeat(5000)
+    })
+  }), "session-input-limit", {
+    env: {
+      TURNSTILE_FETCH: async () => { turnstileCalls += 1; return responseJson({ success: true }); }
+    },
+    store: pendingVerificationStore(),
+    telegram: fakeTelegram()
+  });
+  assert.equal(response.status, 413);
+  assert.equal(turnstileCalls, 0);
+});
+
+test("verification rejects more than eight valid WebRTC IPs before metadata lookup", async () => {
+  let turnstileCalls = 0;
+  let metadataCalls = 0;
+  const ips = Array.from({ length: 9 }, (_value, index) => `8.8.8.${index + 1}`).join(",");
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({
+      "cf-turnstile-response": "token",
+      webrtc_ip: ips
+    })
+  }), "session-input-limit", {
+    env: {
+      TURNSTILE_FETCH: async () => { turnstileCalls += 1; return responseJson({ success: true }); },
+      IP_METADATA_FETCH: async () => { metadataCalls += 1; return responseJson({}); }
+    },
+    store: pendingVerificationStore(),
+    telegram: fakeTelegram()
+  });
+  assert.equal(response.status, 413);
+  assert.equal(turnstileCalls, 0);
+  assert.equal(metadataCalls, 0);
+});
+
+test("verification rejects oversized and deeply wide fingerprint payloads before Turnstile", async () => {
+  for (const fingerprint of [
+    { canvas: "x".repeat(70 * 1024) },
+    { browser: { userAgent: "x".repeat(5000) } }
+  ]) {
+    let turnstileCalls = 0;
+    const response = await handleVerificationRequest(new Request("https://x/api", {
+      method: "POST",
+      body: new URLSearchParams({
+        "cf-turnstile-response": "token",
+        fingerprint_payload: JSON.stringify(fingerprint)
+      })
+    }), "session-input-limit", {
+      env: {
+        TURNSTILE_FETCH: async () => { turnstileCalls += 1; return responseJson({ success: true }); }
+      },
+      store: pendingVerificationStore(),
+      telegram: fakeTelegram()
+    });
+    assert.equal(response.status, 413);
+    assert.equal(turnstileCalls, 0);
+  }
 });
 
 test("D1 verification claim is single-use and releasable", async () => {

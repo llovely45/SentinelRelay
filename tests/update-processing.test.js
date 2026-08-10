@@ -293,3 +293,59 @@ test("a duplicate pending-label delivery that loses the claim is not relayed pri
 
   assert.equal(telegram.calls.some((call) => call.method === "copyMessage"), false);
 });
+
+test("Telegram update claims suppress duplicates and recover stale leases", async () => {
+  const db = createFakeD1();
+  const store = createStore(db);
+  await store.ensureSchema();
+
+  const first = await store.claimTelegramUpdate(9001, 60_000);
+  const duplicate = await store.claimTelegramUpdate(9001, 60_000);
+  assert.equal(first.claimed, true);
+  assert.equal(duplicate.claimed, false);
+  assert.equal(duplicate.completed, false);
+
+  const row = db.state.processed_telegram_updates.get("9001");
+  row.lease_expires_at = "2000-01-01T00:00:00.000Z";
+  const takeover = await store.claimTelegramUpdate(9001, 60_000);
+  assert.equal(takeover.claimed, true);
+  assert.notEqual(takeover.leaseToken, first.leaseToken);
+
+  assert.equal(await store.completeTelegramUpdate(9001, takeover.leaseToken), true);
+  const completed = await store.claimTelegramUpdate(9001, 60_000);
+  assert.equal(completed.claimed, false);
+  assert.equal(completed.completed, true);
+});
+
+test("Telegram update processing is idempotent while failed updates are released for retry", async () => {
+  const store = await makeStore();
+  await store.upsertTelegramUser({ id: 7, first_name: "Alice" });
+  await store.approveUser(7);
+  await store.setTopicThreadId(7, 888);
+
+  let copyAttempts = 0;
+  const telegram = fakeTelegram();
+  const originalCopy = telegram.copyMessage;
+  telegram.copyMessage = async (...args) => {
+    copyAttempts += 1;
+    if (copyAttempts === 1) throw new Error("temporary Telegram failure");
+    return originalCopy(...args);
+  };
+  const update = {
+    update_id: 9002,
+    message: {
+      message_id: 32,
+      chat: { id: 7, type: "private" },
+      from: { id: 7, first_name: "Alice" },
+      text: "retry me"
+    }
+  };
+
+  await assert.rejects(() => processTelegramUpdate(update, { config, store, telegram }));
+  const retry = await processTelegramUpdate(update, { config, store, telegram });
+  const duplicate = await processTelegramUpdate(update, { config, store, telegram });
+
+  assert.equal(retry, undefined);
+  assert.equal(duplicate.skipped, true);
+  assert.equal(copyAttempts, 2);
+});
