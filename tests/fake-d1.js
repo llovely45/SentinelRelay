@@ -261,6 +261,10 @@ export function createFakeD1() {
           && Date.parse(String(row.consumed_at)) > Date.parse(String(params[4]))) {
           return runResult(0);
         }
+        if (releasesSession && lower.includes("consumed_at = ?")
+          && String(row.consumed_at) !== String(params[2])) {
+          return runResult(0);
+        }
         row.status = claimsSession ? "processing" : "pending";
         row.consumed_at = claimsSession ? params[0] : null;
         return runResult(1);

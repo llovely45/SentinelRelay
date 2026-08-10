@@ -111,6 +111,25 @@ test("group topic messages copy back to the mapped private chat", async () => {
     [7, config.groupId, 12]);
 });
 
+test("group topic messages do not relay for an unverified mapped user", async () => {
+  const store = await makeStore();
+  const telegram = fakeTelegram();
+  await store.upsertTelegramUser({ id: 70, first_name: "Pending" });
+  await store.setTopicThreadId(70, 890);
+
+  await processTelegramUpdate({
+    message: {
+      message_id: 15,
+      message_thread_id: 890,
+      chat: { id: config.groupId, type: "supergroup" },
+      from: { id: 99, is_bot: false },
+      text: "must not relay"
+    }
+  }, { config, store, telegram });
+
+  assert.equal(telegram.calls.some((call) => call.method === "copyMessage"), false);
+});
+
 test("/admin checks membership and renders callback keyboard for the mapped topic", async () => {
   const store = await makeStore();
   const telegram = fakeTelegram();

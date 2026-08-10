@@ -38,6 +38,7 @@ test("Telegram client maps convenience methods to Bot API payloads", async () =>
   await telegram.answerCallbackQuery("cb", "done", { show_alert: true });
   await telegram.editMessageText("-100", 11, "edited", { reply_markup: { inline_keyboard: [] } });
   await telegram.deleteMessage("-100", 11);
+  await telegram.deleteForumTopic("-100", 12);
 
   assert.deepEqual(calls, [
     { method: "getChat", payload: { chat_id: "-100" } },
@@ -48,7 +49,8 @@ test("Telegram client maps convenience methods to Bot API payloads", async () =>
     { method: "createForumTopic", payload: { chat_id: "-100", name: "Alice" } },
     { method: "answerCallbackQuery", payload: { callback_query_id: "cb", text: "done", show_alert: true } },
     { method: "editMessageText", payload: { chat_id: "-100", message_id: 11, text: "edited", reply_markup: { inline_keyboard: [] } } },
-    { method: "deleteMessage", payload: { chat_id: "-100", message_id: 11 } }
+    { method: "deleteMessage", payload: { chat_id: "-100", message_id: 11 } },
+    { method: "deleteForumTopic", payload: { chat_id: "-100", message_thread_id: 12 } }
   ]);
 });
 

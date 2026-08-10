@@ -45,7 +45,8 @@ export function fakeTelegram(responses = {}) {
     createForumTopic: record("createForumTopic", { message_thread_id: 1, name: "Verification" }),
     answerCallbackQuery: record("answerCallbackQuery", true),
     editMessageText: record("editMessageText", { message_id: 1 }),
-    deleteMessage: record("deleteMessage", true)
+    deleteMessage: record("deleteMessage", true),
+    deleteForumTopic: record("deleteForumTopic", true)
   };
 }
 

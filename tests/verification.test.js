@@ -130,10 +130,26 @@ test("D1 verification claim is single-use and releasable", async () => {
   await store.ensureSchema();
   await store.upsertTelegramUser({ id: 45, first_name: "Claim" });
   const session = await store.createVerificationSession(45, 30);
-  assert.equal(await store.claimVerificationSession(45, session.session_id), true);
+  const firstToken = await store.claimVerificationSession(45, session.session_id);
+  assert.equal(typeof firstToken, "string");
   assert.equal(await store.claimVerificationSession(45, session.session_id), false);
-  assert.equal(await store.releaseVerificationSession(45, session.session_id), true);
-  assert.equal(await store.claimVerificationSession(45, session.session_id), true);
+  assert.equal(await store.releaseVerificationSession(45, session.session_id, firstToken), true);
+  assert.equal(typeof await store.claimVerificationSession(45, session.session_id), "string");
+});
+
+test("stale verification releases cannot clear a newer takeover lease", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 46, first_name: "Lease owner" });
+  const session = await store.createVerificationSession(46, 30);
+  const firstToken = await store.claimVerificationSession(46, session.session_id, 1);
+  assert.equal(typeof firstToken, "string");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const secondToken = await store.claimVerificationSession(46, session.session_id, 300_000);
+  assert.equal(typeof secondToken, "string");
+  assert.notEqual(secondToken, firstToken);
+  assert.equal(await store.releaseVerificationSession(46, session.session_id, firstToken), false);
+  assert.equal(await store.releaseVerificationSession(46, session.session_id, secondToken), true);
 });
 
 test("concurrent verification claims a session before creating a topic", async () => {
@@ -231,28 +247,30 @@ test("D1 failure after Turnstile returns a safe result instead of rejecting", as
   assert.doesNotMatch(await response.text(), /database secret detail/);
 });
 
-test("a created topic is reused after a completion failure", async () => {
+test("a newly-created topic is deleted after completion failure and recreated on retry", async () => {
   const session = { session_id: "reuse-topic", user_id: 51, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", is_verified: 0, is_blacklisted: 0 };
-  let topicThreadId = null;
   let topicCalls = 0;
   let attempts = 0;
+  const deletedTopics = [];
+  let setTopicCalls = 0;
   const store = {
     async getSession() { return { ...session }; },
     async setLatestFingerprint() {},
     async listBlockedFingerprintLabels() { return []; },
-    async getUser() { return { ...session, topic_thread_id: topicThreadId }; },
-    async setTopicThreadId(_userId, threadId) { topicThreadId = threadId; },
+    async getUser() { return { ...session, topic_thread_id: null }; },
+    async setTopicThreadId() { setTopicCalls += 1; },
     async claimVerificationSession() { return true; },
     async releaseVerificationSession() {},
     async markVerified() {
       attempts += 1;
       if (attempts === 1) throw new Error("transient database failure");
-      return { ...session, is_verified: 1, topic_thread_id: topicThreadId };
+      return { ...session, is_verified: 1, topic_thread_id: 82 };
     }
   };
   const telegram = {
     async createForumTopic() { topicCalls += 1; return { message_thread_id: 82 }; },
-    async sendMessage() {}
+    async sendMessage() {},
+    async deleteForumTopic(...args) { deletedTopics.push(args); }
   };
   const env = { TG_GROUP_ID: "-100123", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}) };
   const request = () => new Request("https://x/api", { method: "POST", body: new URLSearchParams({ "cf-turnstile-response": "token" }) });
@@ -260,8 +278,40 @@ test("a created topic is reused after a completion failure", async () => {
   const second = await handleVerificationRequest(request(), "reuse-topic", { env, store, telegram });
   assert.equal(first.status, 500);
   assert.equal(second.status, 200);
-  assert.equal(topicCalls, 1);
-  assert.equal(topicThreadId, 82);
+  assert.equal(topicCalls, 2);
+  assert.equal(setTopicCalls, 0);
+  assert.deepEqual(deletedTopics, [["-100123", 82]]);
+});
+
+test("a newly-created topic is deleted when the atomic verification commit loses its race", async () => {
+  const user = { user_id: 52, first_name: "Commit race", is_verified: 0, is_blacklisted: 0 };
+  const session = { session_id: "commit-race", user_id: 52, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
+  const deletedTopics = [];
+  const released = [];
+  const store = {
+    async getSession() { return { ...session }; },
+    async setLatestFingerprint() {},
+    async listBlockedFingerprintLabels() { return []; },
+    async getUser() { return { ...user, topic_thread_id: null }; },
+    async claimVerificationSession() { return "lease-token"; },
+    async releaseVerificationSession(...args) { released.push(args); },
+    async markVerified() { return null; }
+  };
+  const telegram = {
+    async createForumTopic() { return { message_thread_id: 83 }; },
+    async deleteForumTopic(...args) { deletedTopics.push(args); }
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), "commit-race", {
+    env: { TG_GROUP_ID: "-100123", TURNSTILE_SECRET_KEY: "secret", TURNSTILE_FETCH: async () => responseJson({ success: true }), IP_METADATA_FETCH: async () => responseJson({}) },
+    store,
+    telegram
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual(deletedTopics, [["-100123", 83]]);
+  assert.deepEqual(released, [[52, "commit-race", "lease-token"]]);
 });
 
 test("missing topic id fails without marking the user verified", async () => {

@@ -726,10 +726,16 @@ export async function handleVerificationRequest(
   }
 
   const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
-  let claimed = false;
-  let claimAttempted = false;
+  let claimToken = null;
   let marked = false;
   let createdThreadId = null;
+  const deleteCreatedTopic = async () => {
+    const numericThreadId = Number(createdThreadId);
+    if (createdThreadId === null || createdThreadId === undefined
+      || !Number.isInteger(numericThreadId) || numericThreadId <= 0
+      || typeof telegram?.deleteForumTopic !== "function") return;
+    try { await telegram.deleteForumTopic(groupId, numericThreadId); } catch {}
+  };
   try {
     const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
     const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
@@ -800,9 +806,8 @@ export async function handleVerificationRequest(
       ? (await store.getUser(session.user_id) || session)
       : session;
     if (typeof store.claimVerificationSession === "function") {
-      claimAttempted = true;
-      claimed = await store.claimVerificationSession(session.user_id, id);
-      if (!claimed) {
+      claimToken = await store.claimVerificationSession(session.user_id, id);
+      if (!claimToken) {
         return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
       }
     }
@@ -820,19 +825,14 @@ export async function handleVerificationRequest(
     if (!Number.isInteger(numericThreadId) || numericThreadId <= 0) {
       throw new Error("Telegram did not return a valid forum topic id");
     }
-    if (createdThreadId !== null && typeof store.setTopicThreadId === "function") {
-      // Keep a successfully-created topic associated with the user even if a
-      // later D1/Telegram step fails; a retry can reuse it instead of creating
-      // a second orphan topic.
-      await store.setTopicThreadId(session.user_id, numericThreadId);
-    }
 
     const verifiedUser = typeof store.markVerified === "function"
       ? await store.markVerified(session.user_id, numericThreadId, id)
       : currentUser;
     if (!verifiedUser && typeof store.markVerified === "function") {
-      if (claimed && typeof store.releaseVerificationSession === "function") {
-        try { await store.releaseVerificationSession(session.user_id, id); } catch {}
+      await deleteCreatedTopic();
+      if (claimToken && typeof store.releaseVerificationSession === "function") {
+        try { await store.releaseVerificationSession(session.user_id, id, claimToken); } catch {}
       }
       return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
     }
@@ -859,11 +859,9 @@ export async function handleVerificationRequest(
     }
     return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
   } catch {
-    if (!marked && createdThreadId !== null && typeof telegram?.deleteForumTopic === "function") {
-      try { await telegram.deleteForumTopic(groupId, Number(createdThreadId)); } catch {}
-    }
-    if ((claimed || claimAttempted) && !marked && typeof store.releaseVerificationSession === "function") {
-      try { await store.releaseVerificationSession(session.user_id, id); } catch {}
+    if (!marked) await deleteCreatedTopic();
+    if (claimToken && !marked && typeof store.releaseVerificationSession === "function") {
+      try { await store.releaseVerificationSession(session.user_id, id, claimToken); } catch {}
     }
     return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
   }
@@ -1213,12 +1211,12 @@ export function createStore(db) {
   }
 
   /** Atomically reserve a verification before creating a Telegram topic. */
-  async function claimVerificationSession(userId, sessionId, leaseMs = 120_000) {
+  async function claimVerificationSession(userId, sessionId, leaseMs = 300_000) {
     const now = new Date().toISOString();
     const requestedLease = Number(leaseMs);
     const safeLease = Number.isFinite(requestedLease) && requestedLease > 0
       ? Math.min(requestedLease, 5 * 60 * 1000)
-      : 120_000;
+      : 300_000;
     const leaseExpiresAt = new Date(Date.now() + safeLease).toISOString();
     const result = await run(`
       UPDATE verification_sessions
@@ -1229,16 +1227,17 @@ export function createStore(db) {
           OR (status = 'processing' AND (consumed_at IS NULL OR consumed_at <= ?))
         )
     `, leaseExpiresAt, sessionId, userId, now, now);
-    return Number(result?.meta?.changes || 0) === 1;
+    return Number(result?.meta?.changes || 0) === 1 ? leaseExpiresAt : false;
   }
 
-  /** Return a failed topic attempt to pending so a user can retry safely. */
-  async function releaseVerificationSession(userId, sessionId) {
+  /** Return a failed topic attempt to pending only when this worker still owns it. */
+  async function releaseVerificationSession(userId, sessionId, claimToken) {
+    if (!claimToken) return false;
     const result = await run(`
       UPDATE verification_sessions
       SET status = 'pending', consumed_at = NULL
-      WHERE session_id = ? AND user_id = ? AND status = 'processing'
-    `, sessionId, userId);
+      WHERE session_id = ? AND user_id = ? AND status = 'processing' AND consumed_at = ?
+    `, sessionId, userId, claimToken);
     return Number(result?.meta?.changes || 0) === 1;
   }
 
@@ -1659,7 +1658,11 @@ export function createTelegramClient({ token, fetchImpl = globalThis.fetch } = {
       text,
       ...options
     }),
-    deleteMessage: (chatId, messageId) => call("deleteMessage", { chat_id: chatId, message_id: messageId })
+    deleteMessage: (chatId, messageId) => call("deleteMessage", { chat_id: chatId, message_id: messageId }),
+    deleteForumTopic: (chatId, messageThreadId) => call("deleteForumTopic", {
+      chat_id: chatId,
+      message_thread_id: messageThreadId
+    })
   };
 }
 
@@ -2291,7 +2294,7 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
   if (await handlePendingAdminInput(message)) return;
   if (!message.message_thread_id || !isForwardableTelegramMessage(message) || message.from?.is_bot) return;
   const user = await getUserForTopic(message.message_thread_id);
-  if (!user || Number(user.is_blacklisted)) return;
+  if (!user || Number(user.is_blacklisted) || Number(user.is_verified) !== 1) return;
   await telegram.copyMessage(user.user_id, groupId, message.message_id);
 }
 
