@@ -827,7 +827,7 @@ export async function handleVerificationRequest(
     }
 
     const verifiedUser = typeof store.markVerified === "function"
-      ? await store.markVerified(session.user_id, numericThreadId, id)
+      ? await store.markVerified(session.user_id, numericThreadId, id, claimToken)
       : currentUser;
     if (!verifiedUser && typeof store.markVerified === "function") {
       await deleteCreatedTopic();
@@ -846,7 +846,10 @@ export async function handleVerificationRequest(
       try { await telegram.deleteMessage(promptChatId, promptMessageId); } catch {}
     }
 
-    const userForNotice = verifiedUser || currentUser || session;
+    const userForNotice = {
+      ...(currentUser || session || {}),
+      ...(verifiedUser || {})
+    };
     if (typeof telegram?.sendMessage === "function") {
       if (groupId !== "") {
         await telegram.sendMessage(groupId, [
@@ -1241,17 +1244,18 @@ export function createStore(db) {
     return Number(result?.meta?.changes || 0) === 1;
   }
 
-  async function markVerified(userId, threadId, sessionId) {
+  async function markVerified(userId, threadId, sessionId, claimToken) {
+    if (claimToken === null || claimToken === undefined || claimToken === "") return null;
     const now = new Date().toISOString();
     const results = await db.batch([
       db.prepare(`
         UPDATE verification_sessions
         SET status = 'passed', consumed_at = ?
-        WHERE session_id = ? AND user_id = ? AND status IN ('pending', 'processing') AND expires_at > ?
+        WHERE session_id = ? AND user_id = ? AND status = 'processing' AND consumed_at = ? AND expires_at > ?
           AND EXISTS (
             SELECT 1 FROM users WHERE user_id = ? AND is_verified = 0
           )
-      `).bind(now, sessionId, userId, now, userId),
+      `).bind(now, sessionId, userId, claimToken, now, userId),
       db.prepare(`
         UPDATE users
         SET is_verified = 1, is_blacklisted = 0, topic_thread_id = ?,
@@ -1265,7 +1269,23 @@ export function createStore(db) {
     const sessionChanged = Number(results?.[0]?.meta?.changes || 0);
     const userChanged = Number(results?.[1]?.meta?.changes || 0);
     if (sessionChanged !== 1 || userChanged !== 1) return null;
-    return getUser(userId);
+    try {
+      return await getUser(userId) || {
+        user_id: userId,
+        is_verified: 1,
+        is_blacklisted: 0,
+        topic_thread_id: threadId
+      };
+    } catch {
+      // The transaction above has committed.  A readback failure must not
+      // make callers delete a topic or release a lease that is already spent.
+      return {
+        user_id: userId,
+        is_verified: 1,
+        is_blacklisted: 0,
+        topic_thread_id: threadId
+      };
+    }
   }
 
   async function approveUser(userId) {

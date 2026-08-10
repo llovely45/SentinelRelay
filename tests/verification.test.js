@@ -110,6 +110,51 @@ test("verification persists fingerprint before matching and completes a pending 
   assert.equal(telegram.calls.some((call) => call.method === "createForumTopic"), true);
 });
 
+test("verification keeps a committed topic when the post-commit user readback fails", async () => {
+  const db = createFakeD1();
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = originalPrepare(sql);
+    if (/^select \* from users where user_id/i.test(String(sql).replace(/\s+/g, " ").trim())) {
+      const originalFirst = statement.first.bind(statement);
+      statement.first = async (...args) => {
+        const row = await originalFirst(...args);
+        const committed = [...db.state.verification_sessions.values()].some((session) => session.status === "passed");
+        if (committed) throw new Error("post-commit readback failed");
+        return row;
+      };
+    }
+    return statement;
+  };
+  const store = createStore(db);
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 43, first_name: "Readback" });
+  const session = await store.createVerificationSession(43, 30);
+  const deletedTopics = [];
+  const telegram = {
+    async createForumTopic() { return { message_thread_id: 9100 }; },
+    async deleteForumTopic(...args) { deletedTopics.push(args); },
+    async sendMessage() {}
+  };
+  const response = await handleVerificationRequest(new Request("https://x/api", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), session.session_id, {
+    env: {
+      TG_GROUP_ID: "-100123",
+      TURNSTILE_SECRET_KEY: "secret",
+      TURNSTILE_FETCH: async () => responseJson({ success: true }),
+      IP_METADATA_FETCH: async () => responseJson({})
+    },
+    store,
+    telegram
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(deletedTopics, []);
+  assert.equal((await db.state.verification_sessions.get(session.session_id)).status, "passed");
+  assert.equal(db.state.users.get("43").topic_thread_id, 9100);
+});
+
 test("metadata timeout returns null without waiting for an unbounded fetch", async () => {
   const started = Date.now();
   const result = await lookupIpMetadata("8.8.8.8", {}, async (_url, init) => new Promise((_resolve, reject) => {
@@ -150,6 +195,27 @@ test("stale verification releases cannot clear a newer takeover lease", async ()
   assert.notEqual(secondToken, firstToken);
   assert.equal(await store.releaseVerificationSession(46, session.session_id, firstToken), false);
   assert.equal(await store.releaseVerificationSession(46, session.session_id, secondToken), true);
+});
+
+test("stale verification lease cannot mark a session after takeover", async () => {
+  const store = createStore(createFakeD1());
+  await store.ensureSchema();
+  await store.upsertTelegramUser({ id: 47, first_name: "Stale marker" });
+  const session = await store.createVerificationSession(47, 30);
+  const firstToken = await store.claimVerificationSession(47, session.session_id, 1);
+  assert.equal(typeof firstToken, "string");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const secondToken = await store.claimVerificationSession(47, session.session_id, 300_000);
+  assert.equal(typeof secondToken, "string");
+  assert.notEqual(secondToken, firstToken);
+
+  const stale = await store.markVerified(47, 9001, session.session_id, firstToken);
+  assert.equal(stale, null);
+  assert.equal((await store.getUser(47)).is_verified, 0);
+  assert.equal((await store.getUser(47)).topic_thread_id, null);
+
+  const current = await store.markVerified(47, 9002, session.session_id, secondToken);
+  assert.equal(current.topic_thread_id, 9002);
 });
 
 test("concurrent verification claims a session before creating a topic", async () => {
@@ -288,6 +354,7 @@ test("a newly-created topic is deleted when the atomic verification commit loses
   const session = { session_id: "commit-race", user_id: 52, status: "pending", expires_at: "2099-01-01T00:00:00.000Z", ...user };
   const deletedTopics = [];
   const released = [];
+  let markedArgs;
   const store = {
     async getSession() { return { ...session }; },
     async setLatestFingerprint() {},
@@ -295,7 +362,7 @@ test("a newly-created topic is deleted when the atomic verification commit loses
     async getUser() { return { ...user, topic_thread_id: null }; },
     async claimVerificationSession() { return "lease-token"; },
     async releaseVerificationSession(...args) { released.push(args); },
-    async markVerified() { return null; }
+    async markVerified(...args) { markedArgs = args; return null; }
   };
   const telegram = {
     async createForumTopic() { return { message_thread_id: 83 }; },
@@ -310,6 +377,7 @@ test("a newly-created topic is deleted when the atomic verification commit loses
     telegram
   });
   assert.equal(response.status, 409);
+  assert.deepEqual(markedArgs, [52, 83, "commit-race", "lease-token"]);
   assert.deepEqual(deletedTopics, [["-100123", 83]]);
   assert.deepEqual(released, [[52, "commit-race", "lease-token"]]);
 });

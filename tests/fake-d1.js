@@ -276,12 +276,20 @@ export function createFakeD1() {
       if (!row || String(row.user_id) !== String(userId) || (lower.includes("status = 'pending'") && row.status !== "pending")) {
         return runResult(0);
       }
+      const requiresProcessingLease = !isFailed && lower.includes("status = 'processing'");
+      if (requiresProcessingLease && row.status !== "processing") return runResult(0);
+      if (requiresProcessingLease && lower.includes("consumed_at = ?")
+        && String(row.consumed_at) !== String(params[3])) {
+        return runResult(0);
+      }
+      const expiryParamIndex = requiresProcessingLease ? 4 : 3;
       if (!isFailed && lower.includes("expires_at > ?")
-        && Date.parse(String(row.expires_at)) <= Date.parse(String(params[3]))) {
+        && Date.parse(String(row.expires_at)) <= Date.parse(String(params[expiryParamIndex]))) {
         return runResult(0);
       }
       if (!isFailed && lower.includes("from users where user_id")) {
-        const user = users.get(String(params[4]));
+        const userParamIndex = requiresProcessingLease ? 5 : 4;
+        const user = users.get(String(params[userParamIndex]));
         if (!user || Number(user.is_verified) !== 0) return runResult(0);
       }
       if (isFailed) {

@@ -11,7 +11,8 @@ test("ensureSchema is idempotent and session is single-use", async () => {
   const user = await store.upsertTelegramUser({ id: 42, first_name: "A" });
   const session = await store.createVerificationSession(user.user_id, 30);
   assert.equal((await store.getSession(session.session_id)).status, "pending");
-  await store.markVerified(42, 1001, session.session_id);
+  const claimToken = await store.claimVerificationSession(42, session.session_id);
+  await store.markVerified(42, 1001, session.session_id, claimToken);
   assert.equal((await store.getSession(session.session_id)).status, "passed");
   assert.equal(await store.getLatestPendingSessionForUser(42), null);
 });
@@ -54,7 +55,8 @@ test("user state, prompts, fingerprints, and session transitions round-trip", as
   assert.equal((await store.getLatestPendingSessionForUser(7)).session_id, session.session_id);
   await store.setTopicThreadId(7, 1001);
   assert.equal((await store.getUserByThreadId(1001)).user_id, 7);
-  await store.markVerified(7, 1001, session.session_id);
+  const claimToken = await store.claimVerificationSession(7, session.session_id);
+  await store.markVerified(7, 1001, session.session_id, claimToken);
   const verified = await store.getUser(7);
   assert.equal(verified.is_verified, 1);
   assert.equal(verified.topic_thread_id, 1001);
@@ -158,7 +160,7 @@ test("expired sessions are not pending and cannot be consumed", async () => {
 
   assert.equal((await store.getSession(session.session_id)).status, "expired");
   assert.equal(await store.getLatestPendingSessionForUser(10), null);
-  assert.equal(await store.markVerified(10, 2000, session.session_id), null);
+  assert.equal(await store.markVerified(10, 2000, session.session_id, "expired-token"), null);
   assert.equal((await store.getUser(10)).is_verified, 0);
 });
 
@@ -167,15 +169,16 @@ test("markVerified consumes a session exactly once under concurrent attempts", a
   await store.ensureSchema();
   await store.upsertTelegramUser({ id: 11, first_name: "Single use" });
   const session = await store.createVerificationSession(11, 30);
+  const claimToken = await store.claimVerificationSession(11, session.session_id);
 
   const results = await Promise.all([
-    store.markVerified(11, 3001, session.session_id),
-    store.markVerified(11, 3002, session.session_id)
+    store.markVerified(11, 3001, session.session_id, claimToken),
+    store.markVerified(11, 3002, session.session_id, claimToken)
   ]);
   assert.equal(results.filter(Boolean).length, 1);
   assert.equal((await store.getSession(session.session_id)).status, "passed");
   assert.equal([3001, 3002].includes((await store.getUser(11)).topic_thread_id), true);
-  assert.equal(await store.markVerified(11, 3999, session.session_id), null);
+  assert.equal(await store.markVerified(11, 3999, session.session_id, claimToken), null);
   assert.notEqual((await store.getUser(11)).topic_thread_id, 3999);
 });
 
