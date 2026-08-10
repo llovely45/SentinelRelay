@@ -685,6 +685,12 @@ export async function handleVerificationRequest(
   if (session.status !== "pending" || isExpiredTimestamp(session.expires_at)) {
     return resultResponse("链接已过期", "请重新在 Telegram 中获取新的验证链接。", 410);
   }
+  if (request?.method && String(request.method).toUpperCase() === "GET") {
+    return new Response(
+      miniApp ? renderMiniAppVerificationPage(basePageOptions) : renderVerificationPage(basePageOptions),
+      { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+    );
+  }
   if (request?.method && String(request.method).toUpperCase() !== "POST") {
     return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "请提交验证表单。" }, 405);
   }
@@ -2318,10 +2324,331 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
   await telegram.copyMessage(user.user_id, groupId, message.message_id);
 }
 
-// Task 2 deliberately keeps the production entrypoint inert; later tasks wire
-// this fetch function to the Telegram/web verification router.
-async function handleRequest() {
-  return new Response("SentinelRelay Worker", { status: 200 });
+const WEBHOOK_PATH = "/telegram/webhook";
+const WEBHOOK_DIGEST_KEY = "webhook_digest";
+
+// D1 is the source of truth for this value.  The weak cache is only a small
+// optimization for bindings that do not return a value from an upsert (and it
+// also avoids duplicate registration during a burst of health checks in one
+// isolate).  A changed persisted value always wins over this cache.
+const webhookDigestCache = new WeakMap();
+
+function jsonResponse(payload, status = 200, headers = {}) {
+  const responseHeaders = new Headers({ "Content-Type": "application/json; charset=utf-8", ...headers });
+  return new Response(payload === null ? null : JSON.stringify(payload), {
+    status,
+    headers: responseHeaders
+  });
+}
+
+function withVerificationCors(response) {
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type, X-Telegram-Bot-Api-Secret-Token");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function telegramOptions(payload, excluded) {
+  const result = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (!excluded.includes(key)) result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Adapt the deterministic fake Telegram client used by tests (or another
+ * injected client) to the fetch transport expected by createTelegramClient.
+ * Production deployments simply fall through to global fetch.
+ */
+function telegramFetchForEnv(env = {}) {
+  const explicit = configValue(env, ["TELEGRAM_FETCH", "telegramFetch"], undefined);
+  if (typeof explicit === "function") return explicit;
+
+  const injected = env?.telegram;
+  if (injected && typeof injected === "object") {
+    return async (url, init = {}) => {
+      const method = String(url).split("/").pop() || "";
+      let payload = {};
+      try {
+        payload = init.body ? JSON.parse(init.body) : {};
+      } catch {
+        payload = {};
+      }
+
+      try {
+        let result;
+        const convenience = injected[method];
+        if (typeof convenience === "function") {
+          switch (method) {
+            case "getMe":
+              result = await convenience();
+              break;
+            case "getChat":
+              result = await convenience(payload.chat_id);
+              break;
+            case "getChatMember":
+              result = await convenience(payload.chat_id, payload.user_id);
+              break;
+            case "setWebhook":
+              result = await convenience(payload.url, payload.secret_token);
+              break;
+            case "sendMessage":
+              result = await convenience(payload.chat_id, payload.text,
+                telegramOptions(payload, ["chat_id", "text"]));
+              break;
+            case "copyMessage":
+              result = await convenience(payload.chat_id, payload.from_chat_id, payload.message_id,
+                telegramOptions(payload, ["chat_id", "from_chat_id", "message_id"]));
+              break;
+            case "createForumTopic":
+              result = await convenience(payload.chat_id, payload.name);
+              break;
+            case "answerCallbackQuery":
+              result = await convenience(payload.callback_query_id, payload.text,
+                telegramOptions(payload, ["callback_query_id", "text"]));
+              break;
+            case "editMessageText":
+              result = await convenience(payload.chat_id, payload.message_id, payload.text,
+                telegramOptions(payload, ["chat_id", "message_id", "text"]));
+              break;
+            case "deleteMessage":
+              result = await convenience(payload.chat_id, payload.message_id);
+              break;
+            case "deleteForumTopic":
+              result = await convenience(payload.chat_id, payload.message_thread_id);
+              break;
+            default:
+              result = await convenience(payload);
+              break;
+          }
+        } else if (typeof injected.call === "function") {
+          result = await injected.call(method, payload);
+        } else {
+          throw new Error("Injected Telegram client has no callable method");
+        }
+        return new Response(JSON.stringify({ ok: true, result }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error_code: Number(error?.code || error?.status || 500),
+          description: String(error?.description || error?.message || "Telegram request failed")
+        }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    };
+  }
+
+  const fallback = configValue(env, ["fetchImpl"], undefined);
+  return typeof fallback === "function" ? fallback : globalThis.fetch;
+}
+
+function createRouterTelegram(env = {}) {
+  return createTelegramClient({
+    token: configValue(env, ["TG_BOT_TOKEN", "tgBotToken", "botToken", "token"], ""),
+    fetchImpl: telegramFetchForEnv(env)
+  });
+}
+
+function requestOrigin(request) {
+  try {
+    return new URL(request?.url || "https://sentinelrelay.invalid/").origin;
+  } catch {
+    return "https://sentinelrelay.invalid";
+  }
+}
+
+/**
+ * Register Telegram's webhook after D1 has been initialized.  The digest is
+ * persisted so every stateless Worker instance can skip an unchanged
+ * registration; the weak cache only covers non-persistent test bindings.
+ */
+export async function ensureWebhook(env = {}, request, store, telegram) {
+  if (!store || typeof store.getRuntimeSetting !== "function" || typeof store.setRuntimeSetting !== "function") {
+    throw new TypeError("store runtime settings are required");
+  }
+  if (!telegram || typeof telegram.setWebhook !== "function") {
+    throw new TypeError("Telegram webhook client is required");
+  }
+
+  const configuredBase = normalizeString(configValue(env, ["APP_BASE_URL", "appBaseUrl", "app_base_url"], ""));
+  const baseUrl = (configuredBase || requestOrigin(request)).replace(/\/+$/, "");
+  const secret = String(configValue(env, ["TG_WEBHOOK_SECRET", "tgWebhookSecret", "webhookSecret"], ""));
+  const digest = await sha256Hex(`${baseUrl}${WEBHOOK_PATH}${secret}`);
+  const persisted = await store.getRuntimeSetting(WEBHOOK_DIGEST_KEY);
+  if (persisted === digest) {
+    if (env?.DB && typeof env.DB === "object") webhookDigestCache.set(env.DB, digest);
+    return { registered: false, skipped: true };
+  }
+  if (env?.DB && typeof env.DB === "object" && webhookDigestCache.get(env.DB) === digest) {
+    return { registered: false, skipped: true };
+  }
+
+  await telegram.setWebhook(`${baseUrl}${WEBHOOK_PATH}`, secret);
+  await store.setRuntimeSetting(WEBHOOK_DIGEST_KEY, digest);
+  if (env?.DB && typeof env.DB === "object") webhookDigestCache.set(env.DB, digest);
+  return { registered: true, skipped: false };
+}
+
+function verificationApiPath(pathname) {
+  return pathname === "/api/verify" || pathname.startsWith("/api/verify/");
+}
+
+function decodePathSegment(value) {
+  try { return decodeURIComponent(value); } catch { return ""; }
+}
+
+/** Module Worker entry point for health, Telegram, and verification routes. */
+export async function handleRequest(request, env = {}, ctx = {}) {
+  let url;
+  try {
+    url = new URL(request?.url || "https://sentinelrelay.invalid/");
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request URL" }, 400);
+  }
+  const method = String(request?.method || "GET").toUpperCase();
+  const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : "/";
+  const isVerificationApi = verificationApiPath(pathname);
+
+  let store;
+  try {
+    store = createStore(env?.DB);
+    // Schema initialization is deliberately awaited.  No handler below may
+    // read or write D1 before this completes.
+    await store.ensureSchema();
+  } catch {
+    const response = jsonResponse({ ok: false, error: "D1 初始化失败" }, 500);
+    return isVerificationApi ? withVerificationCors(response) : response;
+  }
+
+  if (method === "OPTIONS" && isVerificationApi) {
+    return withVerificationCors(new Response(null, {
+      status: 204,
+      headers: { "Access-Control-Allow-Origin": "*" }
+    }));
+  }
+
+  let telegram;
+  const getTelegram = () => {
+    if (!telegram) telegram = createRouterTelegram(env);
+    return telegram;
+  };
+
+  if (pathname === "/") {
+    if (method !== "GET") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
+    return new Response("SentinelRelay Worker is running", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
+  }
+
+  if (pathname === "/health") {
+    if (method !== "GET") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
+    try {
+      const webhook = await ensureWebhook(env, request, store, getTelegram());
+      return jsonResponse({ ok: true, schema: true, webhook });
+    } catch {
+      return jsonResponse({ ok: false, schema: true, error: "Webhook 注册失败" }, 502);
+    }
+  }
+
+  if (pathname === WEBHOOK_PATH) {
+    if (method !== "POST") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
+    const expectedSecret = String(configValue(env, ["TG_WEBHOOK_SECRET", "tgWebhookSecret", "webhookSecret"], ""));
+    const receivedSecret = requestHeader(request, "x-telegram-bot-api-secret-token");
+    if (!expectedSecret || receivedSecret !== expectedSecret) {
+      // Check the secret before touching request.json(), so an attacker cannot
+      // force parsing of arbitrary update bodies with an invalid credential.
+      return jsonResponse({ ok: false, error: "Forbidden" }, 403);
+    }
+    let update;
+    try {
+      update = await request.json();
+    } catch {
+      return jsonResponse({ ok: false, error: "Invalid JSON" }, 400);
+    }
+    if (!update || typeof update !== "object" || Array.isArray(update)) {
+      return jsonResponse({ ok: false, error: "Invalid update" }, 400);
+    }
+    try {
+      await processTelegramUpdate(update, { config: env, store, telegram: getTelegram() });
+      return jsonResponse({ ok: true });
+    } catch {
+      return jsonResponse({ ok: false, error: "Telegram update failed" }, 500);
+    }
+  }
+
+  if (pathname === "/miniapp") {
+    const sessionId = normalizeString(url.searchParams.get("session")
+      || url.searchParams.get("startapp")
+      || url.searchParams.get("tgWebAppStartParam"));
+    if (method === "GET" && !sessionId) {
+      const page = renderMiniAppVerificationPage({
+        siteKey: configValue(env, ["TURNSTILE_SITE_KEY", "turnstileSiteKey", "siteKey"], ""),
+        stunServerUrl: configValue(env, ["STUN_SERVER_URL", "stunServerUrl"], "stun:stun.miwifi.com:3478")
+      });
+      return new Response(page, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    try {
+      const response = await handleVerificationRequest(request, sessionId, {
+        miniApp: true,
+        env,
+        store,
+        telegram: method === "POST" ? getTelegram() : undefined
+      });
+      return response;
+    } catch {
+      return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
+    }
+  }
+
+  const verifyMatch = /^\/verify\/([^/]+)$/.exec(pathname);
+  if (verifyMatch) {
+    const sessionId = decodePathSegment(verifyMatch[1]);
+    try {
+      const response = await handleVerificationRequest(request, sessionId, {
+        env,
+        store,
+        telegram: method === "POST" ? getTelegram() : undefined
+      });
+      return response;
+    } catch {
+      return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
+    }
+  }
+
+  const apiVerifyMatch = /^\/api\/verify\/([^/]+)$/.exec(pathname);
+  if (apiVerifyMatch || pathname === "/api/verify") {
+    const sessionId = apiVerifyMatch ? decodePathSegment(apiVerifyMatch[1]) : "";
+    if (method !== "POST") {
+      const response = jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
+      return withVerificationCors(response);
+    }
+    try {
+      const response = await handleVerificationRequest(request, sessionId, {
+        miniApp: !apiVerifyMatch,
+        env,
+        store,
+        telegram: getTelegram()
+      });
+      return withVerificationCors(response);
+    } catch {
+      return withVerificationCors(resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500));
+    }
+  }
+
+  const response = jsonResponse({ ok: false, error: "Not Found" }, 404);
+  return isVerificationApi ? withVerificationCors(response) : response;
 }
 
 export default { fetch: handleRequest };
