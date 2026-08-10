@@ -247,16 +247,22 @@ export function createFakeD1() {
       const claimsSession = lower.includes("set status = 'processing'");
       const releasesSession = lower.includes("set status = 'pending'") && lower.includes("status = 'processing'");
       if (claimsSession || releasesSession) {
-        const [sessionId, userId] = params;
+        const sessionId = claimsSession ? params[1] : params[0];
+        const userId = claimsSession ? params[2] : params[1];
         const row = sessions.get(String(sessionId));
         if (!row || String(row.user_id) !== String(userId)) return runResult(0);
-        if (claimsSession && row.status !== "pending") return runResult(0);
+        if (claimsSession && row.status !== "pending" && row.status !== "processing") return runResult(0);
         if (releasesSession && row.status !== "processing") return runResult(0);
         if (claimsSession && lower.includes("expires_at > ?")
-          && Date.parse(String(row.expires_at)) <= Date.parse(String(params[2]))) {
+          && Date.parse(String(row.expires_at)) <= Date.parse(String(params[3]))) {
+          return runResult(0);
+        }
+        if (claimsSession && row.status === "processing" && row.consumed_at
+          && Date.parse(String(row.consumed_at)) > Date.parse(String(params[4]))) {
           return runResult(0);
         }
         row.status = claimsSession ? "processing" : "pending";
+        row.consumed_at = claimsSession ? params[0] : null;
         return runResult(1);
       }
       const isFailed = lower.includes("status = 'failed'");

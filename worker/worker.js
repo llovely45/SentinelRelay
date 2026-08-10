@@ -658,7 +658,7 @@ export async function handleVerificationRequest(
       id = normalizeString(preReadForm.session_id || preReadForm.session || preReadForm.startapp);
     }
   }
-  const session = await store.getSession(id);
+  let session = await store.getSession(id);
   const siteKey = configValue(env, ["TURNSTILE_SITE_KEY", "turnstileSiteKey", "siteKey"], "");
   const basePageOptions = {
     siteKey,
@@ -673,6 +673,14 @@ export async function handleVerificationRequest(
   }
   if (session.status === "passed" || Number(session.is_verified)) {
     return resultResponse("已验证", "你已经通过验证，现在可以回到 Telegram 继续聊天。", 200);
+  }
+  if (session.status === "processing") {
+    if (!isExpiredTimestamp(session.consumed_at)) {
+      return resultResponse("验证处理中", "验证请求正在处理，请稍后重试。", 409);
+    }
+    // A crashed Worker can leave a processing lease behind.  Treat a stale
+    // lease as pending and let the D1 claim transition take it over.
+    session = { ...session, status: "pending" };
   }
   if (session.status !== "pending" || isExpiredTimestamp(session.expires_at)) {
     return resultResponse("链接已过期", "请重新在 Telegram 中获取新的验证链接。", 410);
@@ -717,85 +725,87 @@ export async function handleVerificationRequest(
     return resultResponse("验证失败", "验证未通过，当前用户已加入黑名单。", 403);
   }
 
-  const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
-  const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
-  const metadataFetch = env.IP_METADATA_FETCH || env.fetchImpl || globalThis.fetch;
-  const metadataTimeoutMs = configValue(env, ["IP_METADATA_TIMEOUT_MS", "ipMetadataTimeoutMs"], 3000);
-  const metadataList = await Promise.all(allIps.map((ip) => lookupIpMetadata(
-    ip,
-    ip === remoteIp ? request : null,
-    metadataFetch,
-    { timeoutMs: metadataTimeoutMs }
-  )));
-  const metadataByIp = new Map(metadataList.filter(Boolean).map((item) => [item.ip, item]));
-  const publicIpInfo = remoteIp
-    ? (metadataByIp.get(remoteIp) || { ip: remoteIp, asn: "", organization: "" })
-    : null;
-  const fingerprint = parseFingerprintPayload(form.fingerprint_payload || form.fingerprint || "");
-  const fingerprintMeta = await buildFingerprintMeta({
-    system: detectClientSystem(request),
-    publicIpInfo,
-    webrtcIpInfos: webrtcIps.map((ip) => metadataByIp.get(ip) || { ip, asn: "", organization: "" }),
-    fingerprint
-  });
-
-  // Persist before reading labels: this makes the latest fingerprint visible
-  // to administrators even if the subsequent match rejects the user.
-  if (typeof store.setLatestFingerprint === "function") {
-    await store.setLatestFingerprint(session.user_id, fingerprintMeta);
-  }
-  let labels = [];
-  if (typeof store.listBlockedFingerprintLabels === "function") {
-    labels = await store.listBlockedFingerprintLabels();
-  } else if (typeof store.listFingerprintLabels === "function") {
-    labels = (await store.listFingerprintLabels()).filter((label) => Number(label.is_blocked));
-  }
-  // A blocked label is intentionally an exact match by default.  Operators
-  // can opt into a lower threshold explicitly when their labels are trusted.
-  const configuredThreshold = Number(configValue(env, ["FINGERPRINT_MATCH_THRESHOLD", "fingerprintMatchThreshold"], 100));
-  const thresholdValue = Number.isFinite(configuredThreshold) ? configuredThreshold : 100;
-  const blockedMatches = findSimilarFingerprintLabels(fingerprintMeta, labels, thresholdValue)
-    .filter((label) => label.is_blocked === undefined || Number(label.is_blocked));
-  if (blockedMatches.length) {
-    const reason = `fingerprint_blocked:${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(",")}`;
-    if (typeof store.blacklistUser === "function") {
-      await store.blacklistUser(session.user_id, id, reason);
-    }
-    const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
-    await notifyTelegramGroup(
-      telegram,
-      groupId,
-      [
-        "用户验证失败，命中屏蔽标签",
-        `用户ID: ${session.user_id}`,
-        `昵称: ${telegramUserName(session)}`,
-        `标签: ${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(", ")}`,
-        `指纹: ${fingerprintMeta.id}`,
-        "处理: 已加入黑名单，未创建话题，消息不会转发。"
-      ].join("\n")
-    );
-    await notifyTelegram(telegram, session.user_id, "验证未通过，你的设备指纹命中屏蔽标签。", {});
-    return resultResponse("验证未通过", "你的设备指纹命中屏蔽标签，消息不会被转发。", 403);
-  }
-
   const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
-  const currentUser = typeof store.getUser === "function"
-    ? (await store.getUser(session.user_id) || session)
-    : session;
   let claimed = false;
-  if (typeof store.claimVerificationSession === "function") {
-    try {
-      claimed = await store.claimVerificationSession(session.user_id, id);
-    } catch {
-      return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
-    }
-    if (!claimed) {
-      return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
-    }
-  }
-
+  let claimAttempted = false;
   let marked = false;
+  let createdThreadId = null;
   try {
+    const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
+    const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
+    const metadataFetch = env.IP_METADATA_FETCH || env.fetchImpl || globalThis.fetch;
+    const metadataTimeoutMs = configValue(env, ["IP_METADATA_TIMEOUT_MS", "ipMetadataTimeoutMs"], 3000);
+    const metadataList = await Promise.all(allIps.map((ip) => lookupIpMetadata(
+      ip,
+      ip === remoteIp ? request : null,
+      metadataFetch,
+      { timeoutMs: metadataTimeoutMs }
+    )));
+    const metadataByIp = new Map(metadataList.filter(Boolean).map((item) => [item.ip, item]));
+    const publicIpInfo = remoteIp
+      ? (metadataByIp.get(remoteIp) || { ip: remoteIp, asn: "", organization: "" })
+      : null;
+    const fingerprint = parseFingerprintPayload(form.fingerprint_payload || form.fingerprint || "");
+    const fingerprintMeta = await buildFingerprintMeta({
+      system: detectClientSystem(request),
+      publicIpInfo,
+      webrtcIpInfos: webrtcIps.map((ip) => metadataByIp.get(ip) || { ip, asn: "", organization: "" }),
+      fingerprint
+    });
+
+    // Persist before reading labels: this makes the latest fingerprint visible
+    // to administrators even if the subsequent match rejects the user.
+    if (typeof store.setLatestFingerprint === "function") {
+      await store.setLatestFingerprint(session.user_id, fingerprintMeta);
+    }
+    let labels = [];
+    if (typeof store.listBlockedFingerprintLabels === "function") {
+      labels = await store.listBlockedFingerprintLabels();
+    } else if (typeof store.listFingerprintLabels === "function") {
+      labels = (await store.listFingerprintLabels()).filter((label) => Number(label.is_blocked));
+    }
+    // A blocked label is intentionally an exact match by default. Operators
+    // can opt into a bounded lower threshold explicitly.
+    const rawThreshold = normalizeString(configValue(env, ["FINGERPRINT_MATCH_THRESHOLD", "fingerprintMatchThreshold"], 100));
+    const configuredThreshold = Number(rawThreshold);
+    const thresholdValue = rawThreshold !== "" && Number.isFinite(configuredThreshold)
+      && configuredThreshold > 0 && configuredThreshold <= 100
+      ? configuredThreshold
+      : 100;
+    const blockedMatches = findSimilarFingerprintLabels(fingerprintMeta, labels, thresholdValue)
+      .filter((label) => label.is_blocked === undefined || Number(label.is_blocked));
+    if (blockedMatches.length) {
+      const reason = `fingerprint_blocked:${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(",")}`;
+      if (typeof store.blacklistUser === "function") {
+        await store.blacklistUser(session.user_id, id, reason);
+      }
+      const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
+      await notifyTelegramGroup(
+        telegram,
+        groupId,
+        [
+          "用户验证失败，命中屏蔽标签",
+          `用户ID: ${session.user_id}`,
+          `昵称: ${telegramUserName(session)}`,
+          `标签: ${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(", ")}`,
+          `指纹: ${fingerprintMeta.id}`,
+          "处理: 已加入黑名单，未创建话题，消息不会转发。"
+        ].join("\n")
+      );
+      await notifyTelegram(telegram, session.user_id, "验证未通过，你的设备指纹命中屏蔽标签。", {});
+      return resultResponse("验证未通过", "你的设备指纹命中屏蔽标签，消息不会被转发。", 403);
+    }
+
+    const currentUser = typeof store.getUser === "function"
+      ? (await store.getUser(session.user_id) || session)
+      : session;
+    if (typeof store.claimVerificationSession === "function") {
+      claimAttempted = true;
+      claimed = await store.claimVerificationSession(session.user_id, id);
+      if (!claimed) {
+        return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 409);
+      }
+    }
     let threadId = currentUser.topic_thread_id || session.topic_thread_id || null;
     if (threadId === null || threadId === undefined || threadId === "") {
       if (typeof telegram?.createForumTopic !== "function") throw new Error("Telegram topic creation is unavailable");
@@ -804,10 +814,17 @@ export async function handleVerificationRequest(
         : `${currentUser.first_name || "User"} (${currentUser.user_id})`;
       const topic = await telegram.createForumTopic(groupId, topicName.slice(0, 120));
       threadId = topic?.message_thread_id ?? topic?.messageThreadId;
+      createdThreadId = threadId;
     }
     const numericThreadId = Number(threadId);
     if (!Number.isInteger(numericThreadId) || numericThreadId <= 0) {
       throw new Error("Telegram did not return a valid forum topic id");
+    }
+    if (createdThreadId !== null && typeof store.setTopicThreadId === "function") {
+      // Keep a successfully-created topic associated with the user even if a
+      // later D1/Telegram step fails; a retry can reuse it instead of creating
+      // a second orphan topic.
+      await store.setTopicThreadId(session.user_id, numericThreadId);
     }
 
     const verifiedUser = typeof store.markVerified === "function"
@@ -842,7 +859,10 @@ export async function handleVerificationRequest(
     }
     return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
   } catch {
-    if (claimed && !marked && typeof store.releaseVerificationSession === "function") {
+    if (!marked && createdThreadId !== null && typeof telegram?.deleteForumTopic === "function") {
+      try { await telegram.deleteForumTopic(groupId, Number(createdThreadId)); } catch {}
+    }
+    if ((claimed || claimAttempted) && !marked && typeof store.releaseVerificationSession === "function") {
       try { await store.releaseVerificationSession(session.user_id, id); } catch {}
     }
     return resultResponse("验证服务异常", "验证服务暂时不可用，请稍后重试。", 500);
@@ -1192,14 +1212,23 @@ export function createStore(db) {
     return getUser(userId);
   }
 
-  /** Atomically reserve a pending verification before creating a Telegram topic. */
-  async function claimVerificationSession(userId, sessionId) {
+  /** Atomically reserve a verification before creating a Telegram topic. */
+  async function claimVerificationSession(userId, sessionId, leaseMs = 120_000) {
     const now = new Date().toISOString();
+    const requestedLease = Number(leaseMs);
+    const safeLease = Number.isFinite(requestedLease) && requestedLease > 0
+      ? Math.min(requestedLease, 5 * 60 * 1000)
+      : 120_000;
+    const leaseExpiresAt = new Date(Date.now() + safeLease).toISOString();
     const result = await run(`
       UPDATE verification_sessions
-      SET status = 'processing'
-      WHERE session_id = ? AND user_id = ? AND status = 'pending' AND expires_at > ?
-    `, sessionId, userId, now);
+      SET status = 'processing', consumed_at = ?
+      WHERE session_id = ? AND user_id = ? AND expires_at > ?
+        AND (
+          status = 'pending'
+          OR (status = 'processing' AND (consumed_at IS NULL OR consumed_at <= ?))
+        )
+    `, leaseExpiresAt, sessionId, userId, now, now);
     return Number(result?.meta?.changes || 0) === 1;
   }
 
@@ -1207,7 +1236,7 @@ export function createStore(db) {
   async function releaseVerificationSession(userId, sessionId) {
     const result = await run(`
       UPDATE verification_sessions
-      SET status = 'pending'
+      SET status = 'pending', consumed_at = NULL
       WHERE session_id = ? AND user_id = ? AND status = 'processing'
     `, sessionId, userId);
     return Number(result?.meta?.changes || 0) === 1;
