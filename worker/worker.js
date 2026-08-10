@@ -401,6 +401,553 @@ export function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+/**
+ * Verify a browser Turnstile response at Cloudflare's server-side endpoint.
+ * Secrets and tokens are deliberately not included in errors returned to a
+ * caller, because Worker errors are often rendered directly to a browser.
+ */
+export async function verifyTurnstile({
+  secretKey,
+  token,
+  remoteIp,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  if (!normalizeString(secretKey)) throw new TypeError("Turnstile secret key is required");
+  if (!normalizeString(token)) throw new TypeError("Turnstile token is required");
+  if (typeof fetchImpl !== "function") throw new TypeError("A fetch implementation is required");
+
+  const body = new URLSearchParams();
+  body.set("secret", String(secretKey));
+  body.set("response", String(token));
+  if (normalizeString(remoteIp)) body.set("remoteip", normalizeString(remoteIp));
+
+  let response;
+  try {
+    response = await fetchImpl("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+  } catch {
+    throw new Error("Turnstile verification request failed");
+  }
+
+  const status = Number(response?.status);
+  const ok = response && (response.ok !== false) && (!Number.isFinite(status) || (status >= 200 && status < 300));
+  if (!ok) throw new Error("Turnstile verification request failed");
+  try {
+    const result = await response.json();
+    return result && typeof result === "object" ? result : { success: false };
+  } catch {
+    throw new Error("Turnstile verification returned an invalid response");
+  }
+}
+
+// Keep the source-project name available for integrations that still call it.
+export const verifyTurnstileToken = verifyTurnstile;
+
+function normalizeAsn(value) {
+  return normalizeString(value).replace(/^AS/i, "");
+}
+
+function normalizeMetadataResult(ip, value = {}) {
+  const raw = value && typeof value === "object" ? value : {};
+  const source = raw.data && typeof raw.data === "object"
+    ? raw.data
+    : raw.result && typeof raw.result === "object" ? raw.result : raw;
+  const nestedConnection = source.connection && typeof source.connection === "object"
+    ? source.connection : {};
+  const nestedCompany = source.company && typeof source.company === "object"
+    ? source.company : {};
+  return {
+    // Keep the caller's normalized address as the key even if a provider
+    // returns a missing or surprising `ip` field.
+    ip: normalizeString(ip),
+    asn: normalizeAsn(source.asn || source.as || source.asnNumber || source.autonomous_system_number || nestedConnection.asn),
+    organization: normalizeString(
+      source.organization || source.org || source.asOrganization || source.isp
+      || source.autonomous_system_organization || nestedConnection.organization
+      || nestedConnection.org || nestedCompany.name
+    )
+  };
+}
+
+/**
+ * Read ASN/organization metadata from Cloudflare request.cf where available;
+ * otherwise use a small public HTTP lookup.  Metadata is advisory: a failed
+ * lookup still returns the IP so fingerprint verification can continue.
+ */
+export async function lookupIpMetadata(ip, request = null, fetchImpl = globalThis.fetch) {
+  const normalizedIp = normalizeString(ip);
+  if (!normalizedIp || !isPublicIp(normalizedIp)) return null;
+
+  const cf = request?.cf && typeof request.cf === "object" ? request.cf : {};
+  const fromCf = normalizeMetadataResult(normalizedIp, {
+    ip: normalizedIp,
+    asn: cf.asn,
+    asOrganization: cf.asOrganization || cf.as_organization || cf.organization
+  });
+  if (fromCf.asn || fromCf.organization) return fromCf;
+  if (typeof fetchImpl !== "function") return fromCf;
+
+  try {
+    // ipapi.co is intentionally used only as a fallback.  The request never
+    // carries the Turnstile token, Telegram credentials, or browser payload.
+    const response = await fetchImpl(`https://ipapi.co/${encodeURIComponent(normalizedIp)}/json/`, {
+      headers: { Accept: "application/json" }
+    });
+    const status = Number(response?.status);
+    const ok = response && response.ok !== false
+      && (!Number.isFinite(status) || (status >= 200 && status < 300));
+    if (!ok) return fromCf;
+    const payload = await response.json();
+    const result = normalizeMetadataResult(normalizedIp, payload);
+    return result.ip ? result : fromCf;
+  } catch {
+    return fromCf;
+  }
+}
+
+function requestHeader(request, name) {
+  try {
+    return normalizeString(request?.headers?.get?.(name));
+  } catch {
+    return "";
+  }
+}
+
+function requestClientIp(request) {
+  const direct = requestHeader(request, "cf-connecting-ip");
+  if (direct) return direct.split(",")[0].trim();
+  const forwarded = requestHeader(request, "x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return normalizeString(request?.cf?.clientIp || request?.ip);
+}
+
+function detectClientSystem(request) {
+  const userAgent = `${requestHeader(request, "user-agent")} ${normalizeString(request?.cf?.clientAcceptEncoding)}`.toLowerCase();
+  if (userAgent.includes("android")) return "Android";
+  if (userAgent.includes("iphone") || userAgent.includes("ipad") || userAgent.includes("ipod")) return "iOS";
+  if (userAgent.includes("windows nt") || userAgent.includes("windows")) return "Windows";
+  if (userAgent.includes("mac os x") || userAgent.includes("macintosh") || userAgent.includes("mac")) return "macOS";
+  if (userAgent.includes("linux")) return "Linux";
+  return "未知";
+}
+
+async function readVerificationForm(request) {
+  const contentType = requestHeader(request, "content-type").toLowerCase();
+  try {
+    if (contentType.includes("application/json")) {
+      const body = await request.json();
+      return body && typeof body === "object" ? body : {};
+    }
+    const form = await request.formData();
+    return Object.fromEntries(form.entries());
+  } catch {
+    try {
+      const raw = await request.text();
+      return Object.fromEntries(new URLSearchParams(raw).entries());
+    } catch {
+      return {};
+    }
+  }
+}
+
+function parseFingerprintPayload(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function pageErrorResponse(options = {}, status = 400) {
+  const page = options.miniApp
+    ? renderMiniAppVerificationPage(options)
+    : renderVerificationPage(options);
+  return new Response(page, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
+}
+
+function resultResponse(title, description, status = 200) {
+  return new Response(renderResultPage({ title, description }), {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
+}
+
+function telegramUserName(user = {}) {
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.username || `User ${user.user_id ?? user.id ?? ""}`;
+}
+
+function telegramUserInfo(user = {}) {
+  return [
+    "新用户验证通过",
+    `用户ID: ${user.user_id ?? user.id ?? ""}`,
+    `昵称: ${telegramUserName(user)}`,
+    `用户名: ${user.username ? `@${user.username}` : "无"}`,
+    `语言: ${user.language_code || "未知"}`
+  ].join("\n");
+}
+
+async function notifyTelegram(telegram, userId, text, options = {}) {
+  if (!telegram) return;
+  if (typeof telegram.sendMessage === "function") {
+    try { await telegram.sendMessage(userId, text, options); } catch {}
+  } else if (typeof telegram.notifyBlacklist === "function") {
+    try { await telegram.notifyBlacklist(userId, text); } catch {}
+  }
+}
+
+async function notifyTelegramGroup(telegram, groupId, text, options = {}) {
+  if (!telegram || groupId === "" || groupId === null || groupId === undefined) return;
+  if (typeof telegram.sendMessage === "function") {
+    try { await telegram.sendMessage(groupId, text, options); } catch {}
+  }
+}
+
+/**
+ * Handle both the regular verification form and the Telegram Mini App form.
+ * Session state is checked before reading the form or making any external
+ * request, which keeps expired links one-shot and avoids unnecessary calls.
+ */
+export async function handleVerificationRequest(
+  request,
+  sessionId,
+  { miniApp = false, env = {}, store, telegram } = {}
+) {
+  if (!store || typeof store.getSession !== "function") throw new TypeError("store is required");
+  let id = normalizeString(sessionId);
+  let preReadForm = null;
+  if (!id && miniApp) {
+    try {
+      const url = new URL(request?.url || "https://sentinelrelay.invalid/miniapp");
+      id = normalizeString(url.searchParams.get("session") || url.searchParams.get("startapp") || url.searchParams.get("tgWebAppStartParam"));
+    } catch {}
+    if (!id) {
+      preReadForm = await readVerificationForm(request);
+      id = normalizeString(preReadForm.session_id || preReadForm.session || preReadForm.startapp);
+    }
+  }
+  const session = await store.getSession(id);
+  const siteKey = configValue(env, ["TURNSTILE_SITE_KEY", "turnstileSiteKey", "siteKey"], "");
+  const basePageOptions = {
+    siteKey,
+    sessionId: id,
+    errorMessage: "",
+    stunServerUrl: configValue(env, ["STUN_SERVER_URL", "stunServerUrl"], "stun:stun.miwifi.com:3478")
+  };
+
+  if (!session) return resultResponse("链接无效", "该验证链接不存在。", 404);
+  if (Number(session.is_blacklisted)) {
+    return resultResponse("已拒绝访问", "该用户已被加入黑名单。", 403);
+  }
+  if (session.status === "passed" || Number(session.is_verified)) {
+    return resultResponse("已验证", "你已经通过验证，现在可以回到 Telegram 继续聊天。", 200);
+  }
+  if (session.status !== "pending" || isExpiredTimestamp(session.expires_at)) {
+    return resultResponse("链接已过期", "请重新在 Telegram 中获取新的验证链接。", 410);
+  }
+  if (request?.method && String(request.method).toUpperCase() !== "POST") {
+    return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "请提交验证表单。" }, 405);
+  }
+
+  const form = preReadForm || await readVerificationForm(request);
+  const token = normalizeString(form["cf-turnstile-response"] || form.turnstile_token || form.token);
+  if (!token) {
+    return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "缺少 Turnstile 验证结果，请重试。" }, 400);
+  }
+
+  const remoteIp = requestClientIp(request);
+  const turnstileFetch = env.TURNSTILE_FETCH || env.fetchImpl || globalThis.fetch;
+  let turnstile;
+  try {
+    turnstile = await verifyTurnstile({
+      secretKey: configValue(env, ["TURNSTILE_SECRET_KEY", "turnstileSecretKey"], ""),
+      token,
+      remoteIp,
+      fetchImpl: turnstileFetch
+    });
+  } catch {
+    return pageErrorResponse({ ...basePageOptions, miniApp, errorMessage: "验证服务暂时不可用，请稍后重试。" }, 500);
+  }
+
+  if (!turnstile?.success) {
+    const reason = Array.isArray(turnstile?.["error-codes"])
+      ? turnstile["error-codes"].slice(0, 8).join(", ")
+      : "turnstile_failed";
+    if (typeof store.blacklistUser === "function") {
+      try { await store.blacklistUser(session.user_id, id, reason); } catch {}
+    }
+    await notifyTelegramGroup(
+      telegram,
+      configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], ""),
+      ["用户验证失败，已加入黑名单", `用户ID: ${session.user_id}`, `原因: ${reason}`].join("\n")
+    );
+    await notifyTelegram(telegram, session.user_id, "验证失败，当前用户已加入黑名单。", {});
+    return resultResponse("验证失败", "验证未通过，当前用户已加入黑名单。", 403);
+  }
+
+  const webrtcIps = normalizePublicIpList(form.webrtc_ip || form.webrtc_ips || form.webrtcIp || "");
+  const allIps = Array.from(new Set([remoteIp, ...webrtcIps].filter(Boolean)));
+  const metadataFetch = env.IP_METADATA_FETCH || env.fetchImpl || globalThis.fetch;
+  const metadataList = await Promise.all(allIps.map((ip) => lookupIpMetadata(
+    ip,
+    ip === remoteIp ? request : null,
+    metadataFetch
+  )));
+  const metadataByIp = new Map(metadataList.filter(Boolean).map((item) => [item.ip, item]));
+  const publicIpInfo = remoteIp
+    ? (metadataByIp.get(remoteIp) || { ip: remoteIp, asn: "", organization: "" })
+    : null;
+  const fingerprint = parseFingerprintPayload(form.fingerprint_payload || form.fingerprint || "");
+  const fingerprintMeta = await buildFingerprintMeta({
+    system: detectClientSystem(request),
+    publicIpInfo,
+    webrtcIpInfos: webrtcIps.map((ip) => metadataByIp.get(ip) || { ip, asn: "", organization: "" }),
+    fingerprint
+  });
+
+  // Persist before reading labels: this makes the latest fingerprint visible
+  // to administrators even if the subsequent match rejects the user.
+  if (typeof store.setLatestFingerprint === "function") {
+    await store.setLatestFingerprint(session.user_id, fingerprintMeta);
+  }
+  let labels = [];
+  if (typeof store.listBlockedFingerprintLabels === "function") {
+    labels = await store.listBlockedFingerprintLabels();
+  } else if (typeof store.listFingerprintLabels === "function") {
+    labels = (await store.listFingerprintLabels()).filter((label) => Number(label.is_blocked));
+  }
+  // A blocked label is intentionally an exact match by default.  Operators
+  // can opt into a lower threshold explicitly when their labels are trusted.
+  const thresholdValue = Number(configValue(env, ["FINGERPRINT_MATCH_THRESHOLD", "fingerprintMatchThreshold"], 100));
+  const blockedMatches = findSimilarFingerprintLabels(fingerprintMeta, labels, Number.isFinite(thresholdValue) ? thresholdValue : 60)
+    .filter((label) => label.is_blocked === undefined || Number(label.is_blocked));
+  if (blockedMatches.length) {
+    const reason = `fingerprint_blocked:${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(",")}`;
+    if (typeof store.blacklistUser === "function") {
+      await store.blacklistUser(session.user_id, id, reason);
+    }
+    const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
+    await notifyTelegramGroup(
+      telegram,
+      groupId,
+      [
+        "用户验证失败，命中屏蔽标签",
+        `用户ID: ${session.user_id}`,
+        `昵称: ${telegramUserName(session)}`,
+        `标签: ${blockedMatches.map((label) => normalizeString(label.label_name)).filter(Boolean).join(", ")}`,
+        `指纹: ${fingerprintMeta.id}`,
+        "处理: 已加入黑名单，未创建话题，消息不会转发。"
+      ].join("\n")
+    );
+    await notifyTelegram(telegram, session.user_id, "验证未通过，你的设备指纹命中屏蔽标签。", {});
+    return resultResponse("验证未通过", "你的设备指纹命中屏蔽标签，消息不会被转发。", 403);
+  }
+
+  const groupId = configValue(env, ["TG_GROUP_ID", "groupId", "group_id"], "");
+  const currentUser = typeof store.getUser === "function"
+    ? (await store.getUser(session.user_id) || session)
+    : session;
+  let threadId = currentUser.topic_thread_id || session.topic_thread_id || null;
+  if (!threadId && typeof telegram?.createForumTopic === "function") {
+    const topicName = currentUser.username
+      ? `${currentUser.first_name || "User"} (@${currentUser.username})`
+      : `${currentUser.first_name || "User"} (${currentUser.user_id})`;
+    const topic = await telegram.createForumTopic(groupId, topicName.slice(0, 120));
+    threadId = topic?.message_thread_id ?? topic?.messageThreadId ?? null;
+  }
+  const verifiedUser = typeof store.markVerified === "function"
+    ? await store.markVerified(session.user_id, threadId, id)
+    : currentUser;
+  if (!verifiedUser && typeof store.markVerified === "function") {
+    return resultResponse("验证已处理", "该验证会话已被其他请求处理，请回到 Telegram 继续聊天。", 200);
+  }
+  const userForNotice = verifiedUser || currentUser || session;
+  if (typeof telegram?.sendMessage === "function") {
+    if (groupId !== "" && threadId) {
+      await telegram.sendMessage(groupId, [
+        telegramUserInfo(userForNotice),
+        `指纹: ${fingerprintMeta.id}`,
+        `公网 IP: ${fingerprintMeta.publicIpInfo?.ip || "无"}`
+      ].join("\n"), { message_thread_id: threadId });
+    }
+    await notifyTelegram(telegram, session.user_id, "验证成功，请回到 Telegram 继续聊天。", {});
+  }
+  return resultResponse("验证成功", "验证已通过，请回到 Telegram 继续聊天。", 200);
+}
+
+function renderVerificationPageHtml({
+  siteKey,
+  formAction,
+  errorMessage = "",
+  includeTelegramWebApp = false,
+  initialSessionId = "",
+  miniAppMode = false,
+  stunServerUrl = "stun:stun.miwifi.com:3478"
+} = {}) {
+  const safeError = escapeHtml(errorMessage);
+  const safeSiteKey = escapeHtml(siteKey);
+  const safeAction = escapeHtml(formAction);
+  const safeSession = escapeHtml(initialSessionId);
+  const safeStun = JSON.stringify(String(stunServerUrl || "stun:stun.miwifi.com:3478"));
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>身份验证</title>
+    ${includeTelegramWebApp ? '<script src="https://telegram.org/js/telegram-web-app.js"></script>' : ""}
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <style>
+      :root { color-scheme: light; --bg:#f4efe7; --panel:#fff9f0; --ink:#1e1a16; --accent:#d26a2f; --line:#e6d4bf; }
+      * { box-sizing: border-box; }
+      body { margin:0; min-height:100vh; padding:20px; display:grid; place-items:center; color:var(--ink); background:radial-gradient(circle at top left,#ffe5c8 0,transparent 32%),radial-gradient(circle at bottom right,#ffd7b5 0,transparent 28%),var(--bg); font-family:"Segoe UI","PingFang SC",sans-serif; }
+      .card { width:min(100%,460px); padding:28px; border:1px solid var(--line); border-radius:24px; background:rgba(255,249,240,.94); box-shadow:0 22px 70px rgba(76,44,19,.12); }
+      h1 { margin:0 0 10px; font-size:28px; } p { margin:0 0 16px; line-height:1.6; }
+      .privacy-notice { margin:0 0 18px; padding:13px 14px; border:1px solid #e8c59f; border-radius:14px; background:#fff2dd; color:#6d421d; font-size:13px; line-height:1.6; }
+      .privacy-notice strong { display:block; margin-bottom:4px; color:#4f2c13; }
+      .error { margin-bottom:16px; padding:12px 14px; border:1px solid #f2c1af; border-radius:14px; background:#fff0eb; color:#a13d17; }
+      .status { margin-top:12px; color:#7b4b25; font-size:13px; line-height:1.5; }
+      button { width:100%; margin-top:18px; padding:14px 18px; border:0; border-radius:999px; background:linear-gradient(135deg,var(--accent),#9f4719); color:#fff; font-size:16px; cursor:pointer; }
+      button:disabled { opacity:.5; cursor:not-allowed; } .footer { margin-top:14px; opacity:.8; font-size:13px; } .hidden { display:none; }
+    </style>
+    <script>
+      window.onTurnstileSuccess = function () {
+        const button = document.getElementById("verify_button");
+        const status = document.getElementById("turnstile_status");
+        if (button) { button.disabled = false; button.textContent = "完成验证"; }
+        if (status) status.textContent = "Cloudflare 验证已完成，可以点击按钮。";
+      };
+      window.onTurnstileExpired = function () {
+        const button = document.getElementById("verify_button");
+        const status = document.getElementById("turnstile_status");
+        if (button) { button.disabled = true; button.textContent = "等待 Cloudflare 验证"; }
+        if (status) status.textContent = "Cloudflare 验证已过期，请重新完成验证。";
+      };
+      window.onTurnstileError = function () {
+        const button = document.getElementById("verify_button");
+        const status = document.getElementById("turnstile_status");
+        if (button) { button.disabled = true; button.textContent = "等待 Cloudflare 验证"; }
+        if (status) status.textContent = "Cloudflare 验证加载失败，请刷新页面重试。";
+      };
+    </script>
+  </head>
+  <body>
+    <main class="card">
+      <h1>继续聊天前需要验证</h1>
+      <p>此页面使用 Cloudflare Turnstile 进行人机验证。验证通过后，机器人会为你建立独立话题并转发后续消息。</p>
+      <div class="privacy-notice" role="note">
+        <strong>隐私与指纹说明</strong>
+        页面会尝试采集浏览器信号（Canvas、WebGL、Audio、系统、CPU、屏幕、字体和 WebRTC 公网地址），仅用于反滥用和指纹标签匹配。浏览器可以阻止任意信号；所有字段均可为空。你可以拒绝继续验证。
+      </div>
+      ${safeError ? `<div class="error">${safeError}</div>` : ""}
+      <form method="post" action="${safeAction}" id="verification_form">
+        <input type="hidden" name="session_id" id="session_id" value="${safeSession}" />
+        <input type="hidden" name="webrtc_ip" id="webrtc_ip" value="" />
+        <input type="hidden" name="fingerprint_payload" id="fingerprint_payload" value="" />
+        <div class="cf-turnstile" data-sitekey="${safeSiteKey}" data-callback="onTurnstileSuccess" data-expired-callback="onTurnstileExpired" data-error-callback="onTurnstileError"></div>
+        <div class="status" id="turnstile_status">请等待 Cloudflare 验证完成。</div>
+        <button type="submit" id="verify_button" disabled>等待 Cloudflare 验证</button>
+      </form>
+      <div class="error hidden" id="session_error">缺少验证会话，请回到 Telegram 重新打开验证入口。</div>
+      <div class="footer">信号采集失败不会阻止验证；如果验证失败，本次会话可能会被加入黑名单。</div>
+    </main>
+    <script>
+      (function collectSignals() {
+        const miniAppMode = ${miniAppMode ? "true" : "false"};
+        const stunServerUrl = ${safeStun};
+        const form = document.getElementById("verification_form");
+        const sessionInput = document.getElementById("session_id");
+        const sessionError = document.getElementById("session_error");
+        const webrtcInput = document.getElementById("webrtc_ip");
+        const fingerprintInput = document.getElementById("fingerprint_payload");
+        const turnstileStatus = document.getElementById("turnstile_status");
+        const verifyButton = document.getElementById("verify_button");
+        const foundIps = new Set();
+
+        function resolveSessionId() {
+          try {
+            const query = new URLSearchParams(window.location.search);
+            const queryValue = query.get("session") || query.get("startapp") || query.get("tgWebAppStartParam");
+            return queryValue || window.Telegram?.WebApp?.initDataUnsafe?.start_param || sessionInput?.value || "";
+          } catch { return sessionInput?.value || ""; }
+        }
+        if (miniAppMode) {
+          const sessionId = resolveSessionId();
+          if (sessionInput) sessionInput.value = sessionId;
+          if (!sessionId) { form?.classList.add("hidden"); sessionError?.classList.remove("hidden"); }
+          if (window.Telegram?.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
+        }
+        form?.addEventListener("submit", function (event) {
+          if (!document.querySelector('[name="cf-turnstile-response"]')?.value) {
+            event.preventDefault();
+            if (verifyButton) { verifyButton.disabled = true; verifyButton.textContent = "等待 Cloudflare 验证"; }
+            if (turnstileStatus) turnstileStatus.textContent = "Cloudflare 验证还未完成，请稍候。";
+          }
+        });
+        function hashText(value) {
+          if (!value || !window.crypto?.subtle || !window.TextEncoder) return Promise.resolve("");
+          return window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)))
+            .then(function (buffer) { return Array.from(new Uint8Array(buffer)).map(function (item) { return item.toString(16).padStart(2, "0"); }).join("").slice(0, 24); })
+            .catch(function () { return ""; });
+        }
+        function detectOs() {
+          const value = String(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "").toLowerCase() + " " + String(navigator.userAgent || "").toLowerCase();
+          if (value.includes("android")) return "Android";
+          if (value.includes("iphone") || value.includes("ipad") || value.includes("ipod")) return "iOS";
+          if (value.includes("win")) return "Windows";
+          if (value.includes("mac")) return "macOS";
+          if (value.includes("linux")) return "Linux";
+          return "未知";
+        }
+        function collectCpu() { return { hardwareConcurrency: navigator.hardwareConcurrency || null, deviceMemory: navigator.deviceMemory || null, maxTouchPoints: navigator.maxTouchPoints || 0 }; }
+        function collectScreen() { return { width: window.screen?.width || null, height: window.screen?.height || null, availWidth: window.screen?.availWidth || null, availHeight: window.screen?.availHeight || null, colorDepth: window.screen?.colorDepth || null, pixelDepth: window.screen?.pixelDepth || null, pixelRatio: window.devicePixelRatio || null }; }
+        function collectFonts() {
+          try {
+            if (!document.body) return [];
+            const base = ["monospace", "sans-serif", "serif"], candidates = ["Arial", "Helvetica", "Times New Roman", "Courier New", "Verdana", "Georgia", "Trebuchet MS", "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans", "Roboto"];
+            const span = document.createElement("span"); span.textContent = "mmmmmmmmmmlli"; span.style.cssText = "position:absolute;left:-9999px;visibility:hidden;font-size:72px";
+            const defaults = {};
+            base.forEach(function (font) { span.style.fontFamily = font; document.body.appendChild(span); defaults[font] = [span.offsetWidth, span.offsetHeight]; span.remove(); });
+            return candidates.filter(function (font) { return base.some(function (fallback) { span.style.fontFamily = "'" + font + "'," + fallback; document.body.appendChild(span); const different = span.offsetWidth !== defaults[fallback][0] || span.offsetHeight !== defaults[fallback][1]; span.remove(); return different; }); });
+          } catch { return []; }
+        }
+        async function collectCanvasHash() { try { const canvas = document.createElement("canvas"), context = canvas.getContext("2d"); if (!context) return ""; canvas.width = 280; canvas.height = 80; context.fillStyle = "#f60"; context.fillRect(10, 10, 100, 40); context.fillStyle = "#069"; context.font = "16px Arial"; context.fillText("sentinelrelay-fingerprint", 14, 38); context.strokeStyle = "rgba(120,30,200,.8)"; context.beginPath(); context.arc(180, 36, 20, 0, Math.PI * 2); context.stroke(); return await hashText(canvas.toDataURL()); } catch { return ""; } }
+        async function collectAudioHash() { try { const AudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext; if (!AudioContext) return ""; const context = new AudioContext(1, 44100, 44100), oscillator = context.createOscillator(), compressor = context.createDynamicsCompressor(); oscillator.type = "triangle"; oscillator.frequency.value = 1000; oscillator.connect(compressor); compressor.connect(context.destination); oscillator.start(0); const rendered = await context.startRendering(); return await hashText(Array.from(rendered.getChannelData(0).slice(0, 128)).join(",")); } catch { return ""; } }
+        async function collectWebGl() { try { const canvas = document.createElement("canvas"), context = canvas.getContext("webgl") || canvas.getContext("experimental-webgl"); if (!context) return {}; const debug = context.getExtension("WEBGL_debug_renderer_info"), payload = { vendor: debug ? context.getParameter(debug.UNMASKED_VENDOR_WEBGL) : context.getParameter(context.VENDOR), renderer: debug ? context.getParameter(debug.UNMASKED_RENDERER_WEBGL) : context.getParameter(context.RENDERER), version: context.getParameter(context.VERSION) }; return Object.assign(payload, { hash: await hashText(JSON.stringify(payload)) }); } catch { return {}; } }
+        function isPublicIp(value) { const text = String(value || "").trim(); if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(text)) { const parts = text.split(".").map(Number); if (parts.some(function (part) { return part < 0 || part > 255; })) return false; const a = parts[0], b = parts[1]; return a !== 0 && a !== 10 && a !== 127 && a < 224 && !(a === 100 && b >= 64 && b <= 127) && !(a === 169 && b === 254) && !(a === 172 && b >= 16 && b <= 31) && !(a === 192 && b === 168); } if (!/^[0-9a-f:]+$/i.test(text) || !text.includes(":")) return false; const lower = text.toLowerCase(); return lower !== "::" && lower !== "::1" && !lower.startsWith("fc") && !lower.startsWith("fd") && !lower.startsWith("fe80:"); }
+        function storeIp(value) { const text = String(value || "").trim(); if (isPublicIp(text)) foundIps.add(text); if (webrtcInput) webrtcInput.value = Array.from(foundIps).join(", "); }
+        function parseCandidate(value) { const parts = String(value || "").trim().split(/\s+/); if (parts.length > 4) storeIp(parts[4]); }
+        function collectWebRtcIp() { try { if (!webrtcInput || typeof RTCPeerConnection === "undefined") return; const peer = new RTCPeerConnection({ iceServers: stunServerUrl ? [{ urls: stunServerUrl }] : [] }); peer.createDataChannel("ip"); peer.onicecandidate = function (event) { if (event.candidate?.address) storeIp(event.candidate.address); if (event.candidate?.candidate) parseCandidate(event.candidate.candidate); }; peer.createOffer().then(function (offer) { return peer.setLocalDescription(offer); }).catch(function () {}); setTimeout(function () { try { peer.close(); } catch {} }, 3000); } catch {} }
+        async function collectFingerprint() { if (!fingerprintInput) return; const values = await Promise.all([collectCanvasHash(), collectWebGl(), collectAudioHash()]); fingerprintInput.value = JSON.stringify({ os: detectOs(), cpu: collectCpu(), screen: collectScreen(), fonts: collectFonts(), canvas: values[0] || "", webgl: values[1] || {}, audio: values[2] || "", browser: { language: navigator.language || "", languages: Array.isArray(navigator.languages) ? navigator.languages : [], platform: navigator.platform || "", userAgent: navigator.userAgent || "" } }); }
+        collectWebRtcIp(); collectFingerprint().catch(function () {});
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
+export function renderVerificationPage({ siteKey = "", sessionId = "", errorMessage = "", stunServerUrl = "stun:stun.miwifi.com:3478" } = {}) {
+  return renderVerificationPageHtml({ siteKey, formAction: `/api/verify/${encodeURIComponent(String(sessionId))}`, errorMessage, initialSessionId: sessionId, stunServerUrl });
+}
+
+export function renderMiniAppVerificationPage({ siteKey = "", errorMessage = "", stunServerUrl = "stun:stun.miwifi.com:3478" } = {}) {
+  return renderVerificationPageHtml({ siteKey, formAction: "/api/verify", errorMessage, includeTelegramWebApp: true, miniAppMode: true, stunServerUrl });
+}
+
+export function renderResultPage({ title = "验证结果", description = "" } = {}) {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${escapeHtml(title)}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#f7f1ea;color:#241a11;font-family:"Segoe UI","PingFang SC",sans-serif}.box{width:min(100%,440px);padding:28px;border-radius:24px;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.08)}h1{margin:0 0 12px}p{margin:0;line-height:1.6}</style></head><body><main class="box"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></main></body></html>`;
+}
+
 function clone(value) {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== "object") return value;
