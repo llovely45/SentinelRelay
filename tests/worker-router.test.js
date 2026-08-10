@@ -37,6 +37,40 @@ test("health stores a webhook digest and skips unchanged registration", async ()
   assert.equal(calls.filter(([first]) => first === "digest").length, 1);
 });
 
+test("a persisted webhook digest change overrides the isolate cache", async () => {
+  const env = {
+    DB: {},
+    APP_BASE_URL: "https://worker.example",
+    TG_WEBHOOK_SECRET: "a-webhook-secret-long-enough"
+  };
+  const calls = [];
+  let persisted = null;
+  let reads = 0;
+  const store = {
+    async getRuntimeSetting() {
+      reads += 1;
+      return persisted;
+    },
+    async setRuntimeSetting(_key, value) {
+      persisted = value;
+      return value;
+    }
+  };
+  const telegram = {
+    async setWebhook(...args) { calls.push(args); return true; }
+  };
+  const request = new Request("https://worker.example/health");
+
+  await ensureWebhook(env, request, store, telegram);
+  assert.equal(calls.length, 1);
+
+  persisted = "stale-digest-from-d1";
+  const result = await ensureWebhook(env, request, store, telegram);
+  assert.deepEqual(result, { registered: true, skipped: false });
+  assert.equal(calls.length, 2);
+  assert.equal(reads, 2);
+});
+
 test("verification API responses include CORS while other routes do not", async () => {
   const env = createTestEnv({ DB: createFakeD1() });
   const options = { method: "OPTIONS", headers: { origin: "https://example.test" } };

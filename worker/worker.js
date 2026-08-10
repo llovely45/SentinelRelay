@@ -2490,7 +2490,8 @@ export async function ensureWebhook(env = {}, request, store, telegram) {
     if (env?.DB && typeof env.DB === "object") webhookDigestCache.set(env.DB, digest);
     return { registered: false, skipped: true };
   }
-  if (env?.DB && typeof env.DB === "object" && webhookDigestCache.get(env.DB) === digest) {
+  const persistedMissing = persisted === null || persisted === undefined || normalizeString(persisted) === "";
+  if (persistedMissing && env?.DB && typeof env.DB === "object" && webhookDigestCache.get(env.DB) === digest) {
     return { registered: false, skipped: true };
   }
 
