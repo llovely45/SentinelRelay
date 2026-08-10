@@ -2590,10 +2590,11 @@ export async function handleRequest(request, env = {}, ctx = {}) {
   }
 
   if (pathname === "/miniapp") {
+    if (method !== "GET") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
     const sessionId = normalizeString(url.searchParams.get("session")
       || url.searchParams.get("startapp")
       || url.searchParams.get("tgWebAppStartParam"));
-    if (method === "GET" && !sessionId) {
+    if (!sessionId) {
       const page = renderMiniAppVerificationPage({
         siteKey: configValue(env, ["TURNSTILE_SITE_KEY", "turnstileSiteKey", "siteKey"], ""),
         stunServerUrl: configValue(env, ["STUN_SERVER_URL", "stunServerUrl"], "stun:stun.miwifi.com:3478")
@@ -2615,12 +2616,13 @@ export async function handleRequest(request, env = {}, ctx = {}) {
 
   const verifyMatch = /^\/verify\/([^/]+)$/.exec(pathname);
   if (verifyMatch) {
+    if (method !== "GET") return jsonResponse({ ok: false, error: "Method Not Allowed" }, 405);
     const sessionId = decodePathSegment(verifyMatch[1]);
     try {
       const response = await handleVerificationRequest(request, sessionId, {
         env,
         store,
-        telegram: method === "POST" ? getTelegram() : undefined
+        telegram: undefined
       });
       return response;
     } catch {

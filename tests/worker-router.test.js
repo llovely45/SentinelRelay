@@ -71,6 +71,30 @@ test("a persisted webhook digest change overrides the isolate cache", async () =
   assert.equal(reads, 2);
 });
 
+test("verification page routes reject POST without invoking validation", async () => {
+  let turnstileCalls = 0;
+  const env = createTestEnv({
+    TURNSTILE_FETCH: async () => {
+      turnstileCalls += 1;
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+  });
+  const verifyResponse = await handleRequest(new Request("https://worker.example/verify/session", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), env, fakeExecutionContext());
+  const miniAppResponse = await handleRequest(new Request("https://worker.example/miniapp?startapp=session", {
+    method: "POST",
+    body: new URLSearchParams({ "cf-turnstile-response": "token" })
+  }), env, fakeExecutionContext());
+
+  assert.equal(verifyResponse.status, 405);
+  assert.equal(miniAppResponse.status, 405);
+  assert.equal(verifyResponse.headers.get("access-control-allow-origin"), null);
+  assert.equal(miniAppResponse.headers.get("access-control-allow-origin"), null);
+  assert.equal(turnstileCalls, 0);
+});
+
 test("verification API responses include CORS while other routes do not", async () => {
   const env = createTestEnv({ DB: createFakeD1() });
   const options = { method: "OPTIONS", headers: { origin: "https://example.test" } };
