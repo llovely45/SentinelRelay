@@ -8,6 +8,51 @@
 
 const textEncoder = new TextEncoder();
 
+// The static deployment page replaces each quoted value below with a
+// JSON-escaped literal.  Keeping the configuration in the generated Worker
+// means a deployment only needs the D1 binding; environment bindings remain
+// an optional override for local tests or operators who prefer secrets there.
+const EMBEDDED_CONFIG = {
+  TG_BOT_TOKEN: "__TG_BOT_TOKEN__",
+  TG_GROUP_ID: "__TG_GROUP_ID__",
+  APP_BASE_URL: "__APP_BASE_URL__",
+  TURNSTILE_SITE_KEY: "__TURNSTILE_SITE_KEY__",
+  TURNSTILE_SECRET_KEY: "__TURNSTILE_SECRET_KEY__",
+  TG_WEBHOOK_SECRET: "__TG_WEBHOOK_SECRET__",
+  VERIFICATION_TTL_MINUTES: "__VERIFICATION_TTL_MINUTES__",
+  STUN_SERVER_URL: "__STUN_SERVER_URL__"
+};
+
+// Keep the design-document name available to readers and generated snippets.
+const CONFIG = EMBEDDED_CONFIG;
+
+const EMBEDDED_CONFIG_ALIASES = Object.freeze({
+  TG_BOT_TOKEN: "TG_BOT_TOKEN",
+  tgBotToken: "TG_BOT_TOKEN",
+  botToken: "TG_BOT_TOKEN",
+  token: "TG_BOT_TOKEN",
+  TG_GROUP_ID: "TG_GROUP_ID",
+  groupId: "TG_GROUP_ID",
+  group_id: "TG_GROUP_ID",
+  APP_BASE_URL: "APP_BASE_URL",
+  appBaseUrl: "APP_BASE_URL",
+  app_base_url: "APP_BASE_URL",
+  TURNSTILE_SITE_KEY: "TURNSTILE_SITE_KEY",
+  turnstileSiteKey: "TURNSTILE_SITE_KEY",
+  siteKey: "TURNSTILE_SITE_KEY",
+  TURNSTILE_SECRET_KEY: "TURNSTILE_SECRET_KEY",
+  turnstileSecretKey: "TURNSTILE_SECRET_KEY",
+  secretKey: "TURNSTILE_SECRET_KEY",
+  TG_WEBHOOK_SECRET: "TG_WEBHOOK_SECRET",
+  tgWebhookSecret: "TG_WEBHOOK_SECRET",
+  webhookSecret: "TG_WEBHOOK_SECRET",
+  VERIFICATION_TTL_MINUTES: "VERIFICATION_TTL_MINUTES",
+  verificationTtlMinutes: "VERIFICATION_TTL_MINUTES",
+  verification_ttl_minutes: "VERIFICATION_TTL_MINUTES",
+  STUN_SERVER_URL: "STUN_SERVER_URL",
+  stunServerUrl: "STUN_SERVER_URL"
+});
+
 /** D1 schema used by every Worker instance.  All statements are idempotent. */
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -1695,6 +1740,17 @@ export function createTelegramClient({ token, fetchImpl = globalThis.fetch } = {
 function configValue(config, names, fallback = undefined) {
   for (const name of names) {
     if (config && config[name] !== undefined && config[name] !== null) return config[name];
+  }
+
+  // Generated Workers receive only the D1 binding.  Fall back to the values
+  // embedded by deploy/generator.js while preserving explicit environment
+  // overrides above.  Unknown operational settings (for example test fetch
+  // hooks) continue to use the caller-provided fallback.
+  for (const name of names) {
+    const embeddedName = EMBEDDED_CONFIG_ALIASES[name];
+    if (embeddedName && CONFIG[embeddedName] !== undefined && CONFIG[embeddedName] !== null) {
+      return CONFIG[embeddedName];
+    }
   }
   return fallback;
 }

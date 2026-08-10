@@ -10,6 +10,17 @@ coverage.out
 # Local runtime data
 /tmp/
 /data/
+.wrangler/state/
+.d1/
+d1/
+*.sqlite
+*.sqlite3
+
+# Generated Worker bundles and test output
+worker.generated.js
+test-results/
+test-output/
+coverage/
 
 # Feature worktrees
 .worktrees/
