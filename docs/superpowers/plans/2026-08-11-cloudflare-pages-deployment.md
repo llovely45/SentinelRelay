@@ -76,7 +76,7 @@
 
   Expected: all tests pass and all checks exit successfully.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
   ```bash
   git add README.md deploy/README.md
@@ -95,11 +95,11 @@
 
   Start `python3 -m http.server` from the repository root and request all three paths with `curl`; expect HTTP 200 for each and verify the root page references `/deploy/index.html`.
 
-- [ ] **Step 2: Push `main`**
+- [x] **Step 2: Push `main`**
 
   Run: `git push origin main`
 
-- [ ] **Step 3: Confirm the remote ref**
+- [x] **Step 3: Confirm the remote ref**
 
   Run: `git ls-remote --heads origin main`
 
