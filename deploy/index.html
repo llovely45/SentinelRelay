@@ -267,6 +267,7 @@
     const PENDING_KEY = "sentinelrelay_pending_action_v1";
     const REPOSITORY_URL = "https://github.com/llovely45/SentinelRelay";
     const GATE_DELAY_MS = 1000;
+    let gateInFlight = null;
 
     const form = document.getElementById("config-form");
     const validateButton = document.getElementById("validate-button");
@@ -367,14 +368,11 @@
         return { ok: false, bot, chat, error: error?.message || "Telegram API 验证失败" };
       }
 
-      if (!bot || bot.is_bot === false) {
+      if (!bot || bot.is_bot !== true) {
         return { ok: false, bot, chat, error: "Bot Token 验证失败" };
       }
-      if (!chat || chat.type !== "supergroup") {
+      if (!chat || chat.type !== "supergroup" || chat.is_forum !== true) {
         return { ok: false, bot, chat, error: "目标群组必须是 Telegram 超级群，并开启 Topics" };
-      }
-      if (chat.is_forum === false) {
-        return { ok: false, bot, chat, error: "目标超级群尚未开启 Topics（Forum）" };
       }
       return { ok: true, bot, chat };
     }
@@ -404,6 +402,7 @@
         document.body.appendChild(target);
         temporary = true;
       }
+      target.value = source;
       target.focus();
       target.select();
       target.setSelectionRange(0, target.value.length);
@@ -428,9 +427,15 @@
      * localStorage through the tested gate module.
      */
     function requestStarGate(action) {
+      if (gateInFlight) return gateInFlight;
+
       const storage = browserStorage();
       setPendingAction(storage, PENDING_KEY, action);
       const state = getStarGateState(storage, STAR_KEY);
+      const wasValidateDisabled = validateButton.disabled;
+      const wasGenerateDisabled = generateButton.disabled;
+      validateButton.disabled = true;
+      generateButton.disabled = true;
       starModal.hidden = false;
       starSpinner.hidden = false;
       starMessage.textContent = state === "new"
@@ -438,7 +443,7 @@
         : "我们记录到你之前已经打开过仓库。点击“我已验证”后，只放行本次操作；这里不会向 GitHub 查询真实 Star 状态。";
       starActions.replaceChildren();
 
-      return new Promise((resolve) => {
+      const promise = new Promise((resolve) => {
         window.setTimeout(() => {
           starSpinner.hidden = true;
           const actionButton = document.createElement("button");
@@ -469,6 +474,12 @@
           actionButton.focus();
         }, GATE_DELAY_MS);
       });
+      gateInFlight = promise.finally(() => {
+        gateInFlight = null;
+        validateButton.disabled = wasValidateDisabled;
+        generateButton.disabled = wasGenerateDisabled;
+      });
+      return gateInFlight;
     }
 
     async function validateValues(values) {
@@ -563,6 +574,9 @@
     // Expose only non-persistent helpers for browser smoke tests and embeds.
     window.runTelegramValidation = runTelegramValidation;
     window.copyGeneratedWorker = copyGeneratedWorker;
+
+    // Never let a browser submit the named secret fields into a URL/history.
+    form.addEventListener("submit", (event) => event.preventDefault());
   </script>
 </body>
 </html>
