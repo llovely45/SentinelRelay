@@ -1,6 +1,6 @@
 # SentinelRelay 哨兵中继
 
-SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信中继。仓库中的 VLESS 示例仍可单独参考；新的 Telegram Worker 运行时和浏览器部署向导不依赖 Go 或 Node 运行时。
+SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信中继。仓库只保留部署向导、Worker 模板和运行所需的静态资源。
 
 ## 目录
 
@@ -9,7 +9,6 @@ SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信
 - `deploy/index.html`：完全静态的浏览器配置与代码生成页。
 - `deploy/generator.js`、`deploy/gate.js`：部署页使用的纯配置替换和本地 Star 提醒逻辑。
 - `deploy/README.md`：部署向导的详细准备事项和安全说明。
-- `snippets_vless_demo.js`：原有的 VLESS WebSocket/TCP/UDP 中继示例。
 
 ## 连接 GitHub 部署到 Cloudflare Pages
 
@@ -64,15 +63,11 @@ Pages 部署完成后仍需按照下面的 Worker 教程，把生成代码单独
 
 部署页的 Star 提示只是本地浏览器提醒：它只记录是否点击过仓库跳转，不查询 GitHub，也不是权限控制或 GitHub 官方、权威的 Star 验证。清理该浏览器的站点数据即可再次看到提示；该提示不会进入 Worker 运行时，也不影响 Worker 的真实鉴权。
 
-## 现有 VLESS 示例
-
-`snippets_vless_demo.js` 保留了原有的 VLESS WebSocket/TCP/UDP、SOCKS5/HTTP 代理和 DNS over HTTPS 示例逻辑。它与上面的 Telegram Worker 部署流程互不依赖。
-
 ## 安全提示
 
 - 不要把 Telegram Bot Token、Turnstile Secret、Webhook Secret、代理账号密码或生成后的 Worker 代码提交到仓库。
 - 生产部署前请限制可访问的 Telegram 用户，启用日志脱敏，并检查 Cloudflare Worker 的密钥配置。
-- `.gitignore` 已忽略 `.env`、本地 D1/Wrangler 状态、测试输出和 `worker.generated.js`；不要因此忽略源模板或测试文件。
+- `.gitignore` 已忽略 `.env`、本地 D1/Wrangler 状态和 `worker.generated.js`；不要把生成后的 Worker 代码提交到 Git。
 
 ## 许可证
 

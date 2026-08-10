@@ -1,31 +1,18 @@
+# Local secrets and generated Worker source
 .env
 .env.*
 !.env.example
+worker.generated.js
 
-# Go
-/bin/
-*.test
-coverage.out
-
-# Local runtime data
-/tmp/
-/data/
+# Local Cloudflare state
 .wrangler/state/
 .d1/
 d1/
 *.sqlite
 *.sqlite3
 
-# Generated Worker bundles and test output
-worker.generated.js
-test-results/
-test-output/
-coverage/
-
-# Feature worktrees
+# Local tooling and OS files
 .worktrees/
-
-# IDE / OS
 .idea/
 .vscode/
 .DS_Store
