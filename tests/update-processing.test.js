@@ -305,7 +305,7 @@ test("Telegram update claims suppress duplicates and recover stale leases", asyn
   assert.equal(duplicate.claimed, false);
   assert.equal(duplicate.completed, false);
 
-  const row = db.state.processed_telegram_updates.get("9001");
+  const row = db.state.processed_telegram_updates.get("default:9001");
   row.lease_expires_at = "2000-01-01T00:00:00.000Z";
   const takeover = await store.claimTelegramUpdate(9001, 60_000);
   assert.equal(takeover.claimed, true);
@@ -315,6 +315,60 @@ test("Telegram update claims suppress duplicates and recover stale leases", asyn
   const completed = await store.claimTelegramUpdate(9001, 60_000);
   assert.equal(completed.claimed, false);
   assert.equal(completed.completed, true);
+});
+
+test("completed Telegram update rows are pruned after the bounded retention period", async () => {
+  const db = createFakeD1();
+  const store = createStore(db);
+  await store.ensureSchema();
+  const claim = await store.claimTelegramUpdate(9003, 60_000);
+  assert.equal(await store.completeTelegramUpdate(9003, claim.leaseToken), true);
+  db.state.processed_telegram_updates.get("default:9003").completed_at = "2000-01-01T00:00:00.000Z";
+
+  await store.claimTelegramUpdate(9004, 60_000);
+  assert.equal(db.state.processed_telegram_updates.has("default:9003"), false);
+  assert.equal(db.state.processed_telegram_updates.has("default:9004"), true);
+});
+
+test("Telegram update claims are isolated by Bot namespace", async () => {
+  const store = await makeStore();
+  const first = await store.claimTelegramUpdate(9005, 60_000, "bot-a");
+  const second = await store.claimTelegramUpdate(9005, 60_000, "bot-b");
+  assert.equal(first.claimed, true);
+  assert.equal(second.claimed, true);
+  assert.equal(await store.completeTelegramUpdate(9005, first.leaseToken, "bot-a"), true);
+  assert.equal((await store.claimTelegramUpdate(9005, 60_000, "bot-a")).completed, true);
+  assert.equal((await store.claimTelegramUpdate(9005, 60_000, "bot-b")).completed, false);
+});
+
+test("the process wrapper derives Bot namespace so a new Bot can process the same update ID", async () => {
+  const store = await makeStore();
+  await store.upsertTelegramUser({ id: 7, first_name: "Alice" });
+  await store.approveUser(7);
+  await store.setTopicThreadId(7, 888);
+  const telegram = fakeTelegram();
+  const update = {
+    update_id: 9006,
+    message: {
+      message_id: 33,
+      chat: { id: 7, type: "private" },
+      from: { id: 7, first_name: "Alice" },
+      text: "same update id, new bot"
+    }
+  };
+
+  await processTelegramUpdate(update, {
+    config: { ...config, TG_BOT_TOKEN: "123456:abcdefghijklmnopqrstuvwxyzABCDE" },
+    store,
+    telegram
+  });
+  await processTelegramUpdate(update, {
+    config: { ...config, TG_BOT_TOKEN: "987654:zyxwvutsrqponmlkjihgfedcbaABCDE" },
+    store,
+    telegram
+  });
+
+  assert.equal(telegram.calls.filter((call) => call.method === "copyMessage").length, 2);
 });
 
 test("Telegram update processing is idempotent while failed updates are released for retry", async () => {

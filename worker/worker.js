@@ -129,12 +129,14 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
 );
 
 CREATE TABLE IF NOT EXISTS processed_telegram_updates (
-  update_id INTEGER PRIMARY KEY,
+  bot_namespace TEXT NOT NULL DEFAULT '',
+  update_id TEXT NOT NULL,
   status TEXT NOT NULL,
   lease_token TEXT NOT NULL,
   lease_expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  PRIMARY KEY (bot_namespace, update_id)
 );
 CREATE INDEX IF NOT EXISTS idx_processed_telegram_updates_expiry
   ON processed_telegram_updates(status, lease_expires_at);
@@ -620,6 +622,8 @@ const MAX_FINGERPRINT_FIELD_BYTES = 4096;
 const MAX_FINGERPRINT_DEPTH = 8;
 const MAX_FINGERPRINT_KEYS_PER_OBJECT = 128;
 const MAX_TURNSTILE_TOKEN_BYTES = 4096;
+const MAX_VERIFICATION_REQUEST_BYTES = 128 * 1024;
+const PROCESSED_UPDATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 class VerificationInputError extends Error {
   constructor(message, status = 413) {
@@ -786,6 +790,19 @@ export async function handleVerificationRequest(
   { miniApp = false, env = {}, store, telegram } = {}
 ) {
   if (!store || typeof store.getSession !== "function") throw new TypeError("store is required");
+  const requestMethod = String(request?.method || "GET").toUpperCase();
+  const declaredLength = Number(requestHeader(request, "content-length"));
+  if (requestMethod === "POST"
+    && Number.isFinite(declaredLength)
+    && declaredLength > MAX_VERIFICATION_REQUEST_BYTES) {
+    return pageErrorResponse({
+      miniApp,
+      siteKey: configValue(env, ["TURNSTILE_SITE_KEY", "turnstileSiteKey", "siteKey"], ""),
+      sessionId: normalizeString(sessionId),
+      errorMessage: "验证数据过大，请缩减后重试。",
+      stunServerUrl: configValue(env, ["STUN_SERVER_URL", "stunServerUrl"], "stun:stun.miwifi.com:3478")
+    }, 413);
+  }
   let id = normalizeString(sessionId);
   let preReadForm = null;
   if (!id && miniApp) {
@@ -1671,14 +1688,31 @@ export function createStore(db) {
     return getRuntimeSetting(key);
   }
 
+  async function cleanupProcessedTelegramUpdates(retentionMs = PROCESSED_UPDATE_RETENTION_MS) {
+    const requestedRetention = Number(retentionMs);
+    const safeRetention = Number.isFinite(requestedRetention)
+      ? Math.max(requestedRetention, PROCESSED_UPDATE_RETENTION_MS)
+      : PROCESSED_UPDATE_RETENTION_MS;
+    const cutoff = new Date(Date.now() - safeRetention).toISOString();
+    const result = await run(`
+      DELETE FROM processed_telegram_updates
+      WHERE status = 'completed'
+        AND completed_at IS NOT NULL
+        AND completed_at < ?
+    `, cutoff);
+    return Number(result?.meta?.changes || 0);
+  }
+
   /**
    * Atomically claim a Telegram update ID for at-most-once processing while
    * retaining a bounded lease so a crashed Worker can be recovered safely.
    */
-  async function claimTelegramUpdate(updateId, leaseMs = 300_000) {
+  async function claimTelegramUpdate(updateId, leaseMs = 300_000, namespace = "") {
     if (updateId === null || updateId === undefined || String(updateId).trim() === "") {
       return { claimed: false, completed: false };
     }
+    await cleanupProcessedTelegramUpdates();
+    const normalizedNamespace = String(namespace ?? "");
     const normalizedId = String(updateId);
     const now = new Date().toISOString();
     const requestedLease = Number(leaseMs);
@@ -1689,10 +1723,10 @@ export function createStore(db) {
     const leaseToken = randomUuid();
     const inserted = await run(`
       INSERT INTO processed_telegram_updates
-        (update_id, status, lease_token, lease_expires_at, created_at, completed_at)
-      VALUES (?, 'processing', ?, ?, ?, NULL)
-      ON CONFLICT(update_id) DO NOTHING
-    `, normalizedId, leaseToken, leaseExpiresAt, now);
+        (bot_namespace, update_id, status, lease_token, lease_expires_at, created_at, completed_at)
+      VALUES (?, ?, 'processing', ?, ?, ?, NULL)
+      ON CONFLICT(bot_namespace, update_id) DO NOTHING
+    `, normalizedNamespace, normalizedId, leaseToken, leaseExpiresAt, now);
     if (Number(inserted?.meta?.changes || 0) === 1) {
       return { claimed: true, completed: false, leaseToken, lease_token: leaseToken };
     }
@@ -1700,34 +1734,35 @@ export function createStore(db) {
     const takeover = await run(`
       UPDATE processed_telegram_updates
       SET status = 'processing', lease_token = ?, lease_expires_at = ?, created_at = ?, completed_at = NULL
-      WHERE update_id = ? AND status = 'processing' AND lease_expires_at <= ?
-    `, leaseToken, leaseExpiresAt, now, normalizedId, now);
+      WHERE bot_namespace = ? AND update_id = ? AND status = 'processing' AND lease_expires_at <= ?
+    `, leaseToken, leaseExpiresAt, now, normalizedNamespace, normalizedId, now);
     if (Number(takeover?.meta?.changes || 0) === 1) {
       return { claimed: true, completed: false, leaseToken, lease_token: leaseToken };
     }
     const row = await first(`
-      SELECT status FROM processed_telegram_updates WHERE update_id = ? LIMIT 1
-    `, normalizedId);
+      SELECT status FROM processed_telegram_updates
+      WHERE bot_namespace = ? AND update_id = ? LIMIT 1
+    `, normalizedNamespace, normalizedId);
     return { claimed: false, completed: row?.status === "completed" };
   }
 
-  async function completeTelegramUpdate(updateId, leaseToken) {
+  async function completeTelegramUpdate(updateId, leaseToken, namespace = "") {
     if (updateId === null || updateId === undefined || !leaseToken) return false;
     const now = new Date().toISOString();
     const result = await run(`
       UPDATE processed_telegram_updates
       SET status = 'completed', completed_at = ?, lease_expires_at = ?
-      WHERE update_id = ? AND status = 'processing' AND lease_token = ?
-    `, now, now, String(updateId), String(leaseToken));
+      WHERE bot_namespace = ? AND update_id = ? AND status = 'processing' AND lease_token = ?
+    `, now, now, String(namespace ?? ""), String(updateId), String(leaseToken));
     return Number(result?.meta?.changes || 0) === 1;
   }
 
-  async function releaseTelegramUpdate(updateId, leaseToken) {
+  async function releaseTelegramUpdate(updateId, leaseToken, namespace = "") {
     if (updateId === null || updateId === undefined || !leaseToken) return false;
     const result = await run(`
       DELETE FROM processed_telegram_updates
-      WHERE update_id = ? AND status = 'processing' AND lease_token = ?
-    `, String(updateId), String(leaseToken));
+      WHERE bot_namespace = ? AND update_id = ? AND status = 'processing' AND lease_token = ?
+    `, String(namespace ?? ""), String(updateId), String(leaseToken));
     return Number(result?.meta?.changes || 0) === 1;
   }
 
@@ -1766,6 +1801,7 @@ export function createStore(db) {
     consumePendingAdminAction,
     getRuntimeSetting,
     setRuntimeSetting,
+    cleanupProcessedTelegramUpdates,
     claimTelegramUpdate,
     completeTelegramUpdate,
     releaseTelegramUpdate
@@ -2562,9 +2598,15 @@ export async function processTelegramUpdate(update, options = {}) {
   const trackable = updateId !== null && updateId !== undefined
     && String(updateId).trim() !== ""
     && typeof store.claimTelegramUpdate === "function";
+  const botToken = String(configValue(
+    options.config || {},
+    ["TG_BOT_TOKEN", "tgBotToken", "botToken", "token"],
+    ""
+  ));
+  const botNamespace = trackable ? await sha256Hex(botToken) : "";
   let claim = null;
   if (trackable) {
-    claim = await store.claimTelegramUpdate(updateId);
+    claim = await store.claimTelegramUpdate(updateId, 300_000, botNamespace);
     if (!claim?.claimed) {
       return {
         skipped: true,
@@ -2577,13 +2619,21 @@ export async function processTelegramUpdate(update, options = {}) {
   try {
     const result = await processTelegramUpdateCore(update, options);
     if (claim?.claimed && typeof store.completeTelegramUpdate === "function") {
-      await store.completeTelegramUpdate(updateId, claim.leaseToken || claim.lease_token);
+      await store.completeTelegramUpdate(
+        updateId,
+        claim.leaseToken || claim.lease_token,
+        botNamespace
+      );
     }
     return result;
   } catch (error) {
     if (claim?.claimed && typeof store.releaseTelegramUpdate === "function") {
       try {
-        await store.releaseTelegramUpdate(updateId, claim.leaseToken || claim.lease_token);
+        await store.releaseTelegramUpdate(
+          updateId,
+          claim.leaseToken || claim.lease_token,
+          botNamespace
+        );
       } catch {}
     }
     throw error;

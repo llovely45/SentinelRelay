@@ -185,6 +185,25 @@ test("metadata timeout returns null without waiting for an unbounded fetch", asy
   assert.equal(jsonResult, null);
 });
 
+test("verification rejects an oversized declared request before reading the form", async () => {
+  let formRead = false;
+  const request = new Request("https://x/api", {
+    method: "POST",
+    headers: { "content-length": String(128 * 1024 + 1) },
+    body: "ignored"
+  });
+  request.formData = async () => {
+    formRead = true;
+    return new FormData();
+  };
+  const response = await handleVerificationRequest(request, "session-input-limit", {
+    store: pendingVerificationStore(),
+    telegram: fakeTelegram()
+  });
+  assert.equal(response.status, 413);
+  assert.equal(formRead, false);
+});
+
 test("verification rejects oversized raw WebRTC input before Turnstile", async () => {
   let turnstileCalls = 0;
   const response = await handleVerificationRequest(new Request("https://x/api", {
