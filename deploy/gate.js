@@ -39,6 +39,13 @@ export function getStarGateState(storage, key) {
   return isFiniteTimestamp(record.verifiedAt) ? "verified" : "redirected";
 }
 
+/** Return the delayed modal action for each local gate state. */
+export function getStarGatePrompt(state) {
+  if (state === "new") return { button: "点击跳转", action: "redirect" };
+  if (state === "redirected") return { button: "我已验证", action: "verify" };
+  return { button: "", action: "pass" };
+}
+
 /** Persist only the redirect timestamp and repository URL under the Star key. */
 export function markStarRedirect(storage, key, repoUrl, now = Date.now()) {
   const timestamp = now instanceof Date ? now.getTime() : now;

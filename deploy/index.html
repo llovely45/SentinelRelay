@@ -298,14 +298,14 @@
     <section class="modal">
       <div id="star-spinner" class="spinner" aria-hidden="true"></div>
       <h2 id="star-title">请稍候</h2>
-      <p id="star-message">正在准备下一步…</p>
+      <p id="star-message">正在验证是否给项目打星。。。</p>
       <div id="star-actions" class="actions"></div>
     </section>
   </div>
 
   <script type="module">
     import { replaceWorkerPlaceholders, validateDeployConfig, validateDeployField } from "./generator.js";
-    import { getStarGateState, markStarRedirect, markStarVerified, setPendingAction } from "./gate.js";
+    import { getStarGatePrompt, getStarGateState, markStarRedirect, markStarVerified, setPendingAction } from "./gate.js";
 
     const STAR_KEY = "sentinelrelay_star_redirected_v1";
     const PENDING_KEY = "sentinelrelay_pending_action_v1";
@@ -608,9 +608,9 @@
 
     /**
      * Resolve one protected action through the local, one-time reminder flow.
-     * The first attempt opens the repository and stops. The next attempt has
-     * a one-second delay before the confirmation button becomes available;
-     * after confirmation all later actions pass without a dialog.
+     * Both first and second attempts show the same delayed check message; the
+     * first reveals a repository jump button, while the next reveals a
+     * confirmation button. After confirmation all later actions pass.
      */
     function requestStarGate(action) {
       if (gateInFlight) return gateInFlight;
@@ -620,24 +620,12 @@
       const state = getStarGateState(storage, STAR_KEY);
       if (state === "verified") return Promise.resolve(true);
 
-      if (state === "new") {
-        // Record before opening a new tab so the next visit enters the
-        // confirmation branch even when the browser suspends this page.
-        markStarRedirect(storage, STAR_KEY, REPOSITORY_URL, Date.now());
-        if (typeof window.open === "function") {
-          window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
-        } else {
-          window.location.assign(REPOSITORY_URL);
-        }
-        return Promise.resolve(false);
-      }
-
       const protectedButtons = [validateButton, generateButton, ...fieldCheckButtons];
       const previousDisabled = protectedButtons.map((button) => button.disabled);
       protectedButtons.forEach((button) => { button.disabled = true; });
       starModal.hidden = false;
       starSpinner.hidden = false;
-      starMessage.textContent = "正在准备下一步…";
+      starMessage.textContent = "正在验证是否给项目打星。。。";
       starActions.replaceChildren();
 
       const promise = new Promise((resolve) => {
@@ -645,12 +633,28 @@
           starSpinner.hidden = true;
           const actionButton = document.createElement("button");
           actionButton.type = "button";
-          actionButton.textContent = "我已验证";
-          actionButton.addEventListener("click", () => {
-            markStarVerified(storage, STAR_KEY, Date.now());
-            closeStarGate();
-            resolve(true);
-          }, { once: true });
+          const prompt = getStarGatePrompt(state);
+          actionButton.textContent = prompt.button;
+          if (prompt.action === "redirect") {
+            actionButton.addEventListener("click", () => {
+              // Persist before opening a new tab so the next visit enters the
+              // confirmation branch even when the browser suspends this page.
+              markStarRedirect(storage, STAR_KEY, REPOSITORY_URL, Date.now());
+              if (typeof window.open === "function") {
+                window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
+              } else {
+                window.location.assign(REPOSITORY_URL);
+              }
+              closeStarGate();
+              resolve(false);
+            }, { once: true });
+          } else {
+            actionButton.addEventListener("click", () => {
+              markStarVerified(storage, STAR_KEY, Date.now());
+              closeStarGate();
+              resolve(true);
+            }, { once: true });
+          }
           starActions.append(actionButton);
           actionButton.focus();
         }, GATE_DELAY_MS);
