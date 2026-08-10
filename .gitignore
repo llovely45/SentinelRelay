@@ -11,6 +11,9 @@ coverage.out
 /tmp/
 /data/
 
+# Feature worktrees
+.worktrees/
+
 # IDE / OS
 .idea/
 .vscode/
