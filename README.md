@@ -4,6 +4,7 @@ SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信
 
 ## 目录
 
+- `index.html`、`_headers`：Cloudflare Pages 静态入口和安全响应头。
 - `worker/worker.js`：可直接粘贴到 Cloudflare Workers 的单文件模块 Worker 模板。模板中的配置占位符由部署页替换，D1 表结构会在第一次请求时自动建立。
 - `deploy/index.html`：完全静态的浏览器配置与代码生成页。
 - `deploy/generator.js`、`deploy/gate.js`：部署页使用的纯配置替换和本地 Star 提醒逻辑。
