@@ -29,27 +29,27 @@
 - `index.html` redirects `/` to `/deploy/index.html` without third-party code.
 - `_headers` declares CSP, frame, referrer, MIME-sniffing, and cache behavior for static Pages responses.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
   Add tests that read the root entry and `_headers`, assert the deploy redirect target, reject external scripts in the root entry, and assert the required Pages header declarations.
 
-- [ ] **Step 2: Run the focused test to verify it fails**
+- [x] **Step 2: Run the focused test to verify it fails**
 
   Run: `npm test -- tests/pages-deployment.test.js`
 
   Expected: FAIL because `index.html`, `_headers`, and the test file do not yet exist.
 
-- [ ] **Step 3: Write the minimal static files**
+- [x] **Step 3: Write the minimal static files**
 
   Create an HTML redirect with a visible fallback link to `/deploy/index.html`. Create `_headers` with a default CSP allowing only same-origin resources plus the existing Turnstile and Telegram script origins, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` for `/`, `/deploy/index.html`, and `/worker/worker.js`.
 
-- [ ] **Step 4: Run the focused test to verify it passes**
+- [x] **Step 4: Run the focused test to verify it passes**
 
   Run: `npm test -- tests/pages-deployment.test.js`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add index.html _headers tests/pages-deployment.test.js
@@ -66,11 +66,11 @@
 - Documentation names the GitHub repository connection settings exactly: production branch `main`, build command empty, output directory `.`.
 - Documentation explains that Pages hosts only the wizard and the generated Worker still needs independent Workers + D1 deployment.
 
-- [ ] **Step 1: Update the deployment documentation**
+- [x] **Step 1: Update the deployment documentation**
 
   Add a Pages section with Dashboard steps: Workers & Pages → Create → Pages → Connect to Git → select `llovely45/SentinelRelay` → production branch `main` → no build command → output directory `.` → Save and Deploy. Include the resulting `/deploy/index.html` path and the root redirect behavior.
 
-- [ ] **Step 2: Run documentation and full regression checks**
+- [x] **Step 2: Run documentation and full regression checks**
 
   Run: `npm test && node --check deploy/generator.js && node --check deploy/gate.js && node --check worker/worker.js && git diff --check`
 
@@ -91,7 +91,7 @@
 **Interfaces:**
 - The repository’s static output serves `/`, `/deploy/index.html`, and `/worker/worker.js`.
 
-- [ ] **Step 1: Run the static HTTP smoke test**
+- [x] **Step 1: Run the static HTTP smoke test**
 
   Start `python3 -m http.server` from the repository root and request all three paths with `curl`; expect HTTP 200 for each and verify the root page references `/deploy/index.html`.
 

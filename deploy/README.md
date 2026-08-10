@@ -2,6 +2,19 @@
 
 `deploy/index.html` 是一个完全静态的配置页。它在浏览器中校验 Telegram 配置、读取同源的 `worker/worker.js` 模板并替换配置占位符；不会把 Token、Secret、生成代码写入服务器、URL、下载文件或 `localStorage`。
 
+## 连接 GitHub 部署到 Cloudflare Pages
+
+本项目的 Pages 部署只托管这个静态向导，不部署 Telegram Worker。打开 Cloudflare 控制台，选择 **Workers & Pages → Create → Pages → Connect to Git**，授权 GitHub 后选择 [`llovely45/SentinelRelay`](https://github.com/llovely45/SentinelRelay)，配置：
+
+- Production branch：`main`
+- Framework preset：`None`
+- Build command：留空
+- Build output directory：`.`
+
+部署完成后，访问 Pages 根地址即可自动跳转到 `/deploy/index.html`；也可以直接访问该路径。页面会从同源 `/worker/worker.js` 读取模板。Pages 只负责展示向导和提供静态模板，不接收任何密钥，也不处理 Telegram Webhook。
+
+生成代码后，仍需把代码单独粘贴到 Cloudflare Workers，并绑定名为 `DB` 的 D1 数据库；这一步不通过 Pages Functions 完成。
+
 ## 1. 用 HTTP 打开页面
 
 不要直接双击 `index.html`。ES 模块和同源模板读取需要 HTTP 服务。请在仓库根目录运行：

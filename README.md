@@ -10,6 +10,19 @@ SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信
 - `deploy/README.md`：部署向导的详细准备事项和安全说明。
 - `snippets_vless_demo.js`：原有的 VLESS WebSocket/TCP/UDP 中继示例。
 
+## 连接 GitHub 部署到 Cloudflare Pages
+
+Pages 只托管静态部署向导，不部署 Telegram Worker。Cloudflare 控制台中选择 **Workers & Pages → Create → Pages → Connect to Git**，授权并选择 [`llovely45/SentinelRelay`](https://github.com/llovely45/SentinelRelay)，然后使用以下设置：
+
+- 生产分支：`main`
+- Framework preset：`None`
+- Build command：留空
+- Build output directory：`.`
+
+保存并部署后，Pages 根地址会自动跳转到 `/deploy/index.html`。部署向导会从同源 `/worker/worker.js` 读取模板，配置验证和最终代码生成都在浏览器内完成。
+
+Pages 部署完成后仍需按照下面的 Worker 教程，把生成代码单独部署到 Cloudflare Workers，并绑定 D1 `DB`；Pages 不承载 Telegram Webhook，也不需要 Pages Functions。
+
 ## 浏览器生成与部署（复制粘贴流程）
 
 1. 在仓库根目录启动一个静态 HTTP 服务（不要直接双击 HTML）：
