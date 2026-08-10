@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+# Go
+/bin/
+*.test
+coverage.out
+
+# Local runtime data
+/tmp/
+/data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
