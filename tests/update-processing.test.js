@@ -209,3 +209,47 @@ test("callback actions update state and refresh label pages", async () => {
   assert.match(edit.args[2], /指纹标签/);
   assert.ok(edit.args[3].reply_markup.inline_keyboard.some((row) => row.some((button) => button.callback_data?.startsWith("topicadmin:dellabel:7:"))));
 });
+
+test("delete-label callback cannot delete a label belonging to another topic user", async () => {
+  const store = await makeStore();
+  const telegram = fakeTelegram();
+  const meta = await buildFingerprintMeta({ fingerprint: { canvas: "other" } });
+  await store.upsertTelegramUser({ id: 7, first_name: "Alice" });
+  await store.upsertTelegramUser({ id: 8, first_name: "Bob" });
+  await store.setTopicThreadId(7, 888);
+  await store.setTopicThreadId(8, 889);
+  const label = await store.createFingerprintLabel({
+    labelName: "bob-label",
+    fingerprintMeta: meta,
+    sourceUserId: 8,
+    createdByUserId: 99
+  });
+
+  await processTelegramUpdate({
+    callback_query: {
+      id: "cb-cross-user-delete",
+      from: { id: 99 },
+      message: { message_id: 30, message_thread_id: 888, chat: { id: config.groupId, type: "supergroup" } },
+      data: `topicadmin:dellabel:7:${label.id}:1`
+    }
+  }, { config, store, telegram });
+
+  assert.equal((await store.getFingerprintLabelById(label.id)).label_name, "bob-label");
+  assert.equal(telegram.calls.some((call) => call.method === "editMessageText"), false);
+});
+
+test("pending fingerprint actions are consumed once", async () => {
+  const store = await makeStore();
+  await store.upsertPendingAdminAction({
+    threadId: 888,
+    adminId: 99,
+    userId: 7,
+    action: { type: "markfp", isBlocked: false },
+    expiresAt: "2099-01-01T00:00:00.000Z"
+  });
+
+  const first = await store.consumePendingAdminAction(888, 99, "markfp");
+  const second = await store.consumePendingAdminAction(888, 99, "markfp");
+  assert.deepEqual(first.action, { type: "markfp", isBlocked: false });
+  assert.equal(second, null);
+});

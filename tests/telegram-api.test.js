@@ -55,6 +55,7 @@ test("Telegram client maps convenience methods to Bot API payloads", async () =>
 test("Telegram client normalizes HTTP and Telegram errors without leaking token", async () => {
   const token = "123:super-secret-token";
   const responses = [
+    { ok: true, status: 500, json: async () => ({ ok: true, result: { accepted: true } }) },
     new Response("gateway failed", { status: 502 }),
     new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: invalid" }), { status: 200 })
   ];
@@ -63,6 +64,11 @@ test("Telegram client normalizes HTTP and Telegram errors without leaking token"
     fetchImpl: async () => responses.shift()
   });
 
+  await assert.rejects(() => telegram.getMe(), (error) => {
+    assert.match(error.message, /Telegram API request failed/);
+    assert.equal(error.status, 500);
+    return true;
+  });
   await assert.rejects(() => telegram.getMe(), (error) => {
     assert.match(error.message, /Telegram API request failed/);
     assert.doesNotMatch(error.message, new RegExp(token));

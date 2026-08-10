@@ -783,6 +783,27 @@ export function createStore(db) {
     return run("DELETE FROM pending_admin_actions WHERE thread_id = ? AND admin_id = ?", threadId, adminId);
   }
 
+  /**
+   * Atomically claim a pending administrator action.  The initial read is
+   * useful to return the action payload, while the conditional delete makes a
+   * concurrent retry lose the claim when another request has already deleted
+   * the same row.
+   */
+  async function consumePendingAdminAction(threadId, adminId, expectedType = undefined) {
+    const row = await getPendingAdminAction(threadId, adminId);
+    if (!row) return null;
+    const action = row.action;
+    const actionType = typeof action === "string" ? action : action?.type ?? action?.action;
+    if (expectedType !== undefined && actionType !== expectedType) return null;
+    const now = new Date().toISOString();
+    const result = await run(`
+      DELETE FROM pending_admin_actions
+      WHERE thread_id = ? AND admin_id = ? AND expires_at > ?
+    `, threadId, adminId, now);
+    if (Number(result?.meta?.changes || 0) !== 1) return null;
+    return row;
+  }
+
   async function getRuntimeSetting(key) {
     const row = await first("SELECT value FROM runtime_settings WHERE key = ? LIMIT 1", key);
     return row?.value ?? null;
@@ -828,6 +849,7 @@ export function createStore(db) {
     upsertPendingAdminAction,
     getPendingAdminAction,
     deletePendingAdminAction,
+    consumePendingAdminAction,
     getRuntimeSetting,
     setRuntimeSetting
   };
@@ -892,9 +914,10 @@ export function createTelegramClient({ token, fetchImpl = globalThis.fetch } = {
       });
     }
 
-    const httpOk = response.ok === undefined
-      ? Number(response.status) >= 200 && Number(response.status) < 300
-      : response.ok;
+    const status = Number(response.status);
+    const hasStatus = Number.isFinite(status);
+    const statusOk = hasStatus ? status >= 200 && status < 300 : response.ok !== false;
+    const httpOk = statusOk && response.ok !== false;
     let body = null;
     try {
       body = await response.json();
@@ -1326,14 +1349,26 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
     const threadId = message?.message_thread_id;
     if (!sameId(message?.chat?.id, groupId) || threadId === undefined || !message?.from) return false;
     if (message.from.is_bot) return false;
-    const pending = typeof store.getPendingAdminAction === "function"
-      ? await store.getPendingAdminAction(threadId, message.from.id)
-      : null;
+    let pending;
+    const canConsumeAtomically = typeof store.consumePendingAdminAction === "function";
+    if (canConsumeAtomically) {
+      if (!(await isGroupAdmin(message.from.id))) return true;
+      pending = await store.consumePendingAdminAction(threadId, message.from.id, "markfp");
+      // Another webhook retry may have claimed and removed this action first;
+      // let the message continue through normal topic relay in that case.
+      if (!pending) return false;
+    } else {
+      pending = typeof store.getPendingAdminAction === "function"
+        ? await store.getPendingAdminAction(threadId, message.from.id)
+        : null;
+    }
     const action = pending?.action;
     const actionType = typeof action === "string" ? action : action?.type ?? action?.action;
     if (!pending || actionType !== "markfp") return false;
-    if (!(await isGroupAdmin(message.from.id))) return true;
-    if (typeof store.deletePendingAdminAction === "function") await store.deletePendingAdminAction(threadId, message.from.id);
+    if (!canConsumeAtomically) {
+      if (!(await isGroupAdmin(message.from.id))) return true;
+      if (typeof store.deletePendingAdminAction === "function") await store.deletePendingAdminAction(threadId, message.from.id);
+    }
     const parsed = parseFingerprintMarkInput(message.text);
     if (!parsed) {
       await sendAdminReply("标记失败，请使用 `标签|备注` 格式重新操作。", threadId, { parse_mode: "Markdown" });
@@ -1465,6 +1500,16 @@ export async function processTelegramUpdate(update, { config = {}, store, telegr
     if (match) {
       const context = await callbackContext(callback, Number(match[1]));
       if (!context) return;
+      const label = await store.getFingerprintLabelById(Number(match[2]));
+      const sourceUserId = label?.source_user_id ?? label?.sourceUserId;
+      if (!label) {
+        await answerCallback(callback, "标签不存在", { show_alert: true });
+        return;
+      }
+      if (!sameId(sourceUserId, context.topicUser.user_id)) {
+        await answerCallback(callback, "话题用户不匹配", { show_alert: true });
+        return;
+      }
       await store.deleteFingerprintLabelById(Number(match[2]));
       await renderUserLabels(callback, context.topicUser, Number(match[3]));
       await answerCallback(callback, "已删除标签");
