@@ -39,8 +39,10 @@ SentinelRelay/
 │       └── plans/
 ├── README.md              # 项目入口和运行时说明
 ├── .gitignore
-└── go.mod                 # 保留现有仓库文件，不参与 Worker 构建
+└── snippets_vless_demo.js # 现有 VLESS 示例，和新 Worker 运行时互不依赖
 ```
+
+现有仓库中的 VLESS 示例可继续保留；Go 模块文件不是 Worker 运行时依赖，若已被清理则不需要恢复。
 
 生成后的含密钥 `worker.js` 只存在于部署页内存和用户剪贴板中，不写入 `localStorage`、下载文件或 Git 仓库。
 
