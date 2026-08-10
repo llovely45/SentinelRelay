@@ -9,11 +9,11 @@
 - Production branch：`main`
 - Framework preset：`None`
 - Root directory：`.`
-- Build command：`mkdir -p .pages-dist && cp deploy/index.html deploy/generator.js deploy/gate.js deploy/worker.js .pages-dist/`
+- Build command：`mkdir -p .pages-dist && find .pages-dist -mindepth 1 -maxdepth 1 -delete && cp deploy/index.html deploy/generator.js deploy/gate.js deploy/worker.js .pages-dist/`
 - Build output directory：`.pages-dist`
-- Deploy command（如果控制台显示此字段）：`npx wrangler pages deploy .pages-dist --project-name sentinelrelay --branch main`
+- Deploy command（如果控制台强制显示此字段）：`node -e "console.log('Cloudflare Pages 将自动发布 .pages-dist')"`
 
-部署完成后，访问 Pages 根地址即可直接打开部署向导。页面会从同源 `./worker.js` 读取模板。Pages 只负责展示向导和提供静态模板，不接收任何密钥，也不处理 Telegram Webhook。若构建环境执行 Deploy command，请配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`；否则由 Pages 自动发布 `.pages-dist`。
+部署完成后，访问 Pages 根地址即可直接打开部署向导。页面会从同源 `./worker.js` 读取模板。Pages 只负责展示向导和提供静态模板，不接收任何密钥，也不处理 Telegram Webhook。Pages Git 集成会自动发布 `.pages-dist`，不要在同一次构建里再执行 Wrangler 发布；若改用命令行手动发布，使用 `npx wrangler pages deploy .pages-dist --project-name sentinelrelay --branch main` 并配置相应的 Cloudflare 凭据。
 
 生成代码后，仍需把代码单独粘贴回 Cloudflare Workers 默认项目，并继续使用名为 `DB` 的 D1 绑定；这一步不通过 Pages Functions 完成。
 

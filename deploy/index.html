@@ -313,7 +313,7 @@
     const REPOSITORY_URL = "https://github.com/llovely45/SentinelRelay";
     const GATE_DELAY_MS = 1000;
     const RESET_CLICK_COUNT = 5;
-    const RESET_CLICK_WINDOW_MS = 1800;
+    const RESET_CLICK_WINDOW_MS = 3000;
     const CONFIG_FIELDS = Object.freeze([
       "TG_BOT_TOKEN",
       "TG_GROUP_ID",
@@ -676,7 +676,9 @@
         return null;
       }
       renderFieldError("APP_BASE_URL", "");
-      setStatus(formStatus, "正在向 Telegram 请求 getMe 和 getChat…", "busy");
+      setStatus(formStatus, worker.opaque
+        ? "Worker 网络可达（默认脚本未提供 CORS，继续进行本地配置验证）…"
+        : "正在向 Telegram 请求 getMe 和 getChat…", "busy");
       const telegram = await runTelegramValidation(values);
       if (!telegram.ok) {
         for (const [name, message] of Object.entries(telegram.fieldErrors || {})) renderFieldError(name, message);
@@ -707,7 +709,9 @@
           setStatus(formStatus, `Worker 地址验证失败：${worker.error}`, "error");
           return;
         }
-        setStatus(formStatus, "Worker 地址可达。", "success");
+        setStatus(formStatus, worker.opaque
+          ? "Worker 网络可达（默认脚本未提供 CORS，已完成网络检查）。"
+          : "Worker 地址可达。", "success");
         return;
       }
 
