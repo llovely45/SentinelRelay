@@ -833,6 +833,745 @@ export function createStore(db) {
   };
 }
 
+/**
+ * A deliberately small, dependency-free Telegram Bot API client.  Telegram
+ * accepts JSON for every method we use, so keeping the transport in one place
+ * makes the Worker easier to test and prevents credentials from appearing in
+ * normalized errors.
+ */
+export function createTelegramClient({ token, fetchImpl = globalThis.fetch } = {}) {
+  const botToken = String(token ?? "");
+  if (!botToken) throw new TypeError("Telegram bot token is required");
+  if (typeof fetchImpl !== "function") throw new TypeError("A fetch implementation is required");
+
+  function redact(value) {
+    return String(value ?? "").replaceAll(botToken, "[redacted]");
+  }
+
+  function buildError(message, details = {}) {
+    const error = new Error(redact(message));
+    Object.assign(error, details);
+    if (details.description && !error.response) {
+      error.response = { description: redact(details.description) };
+    }
+    return error;
+  }
+
+  function safeResponse(body) {
+    if (body === null || body === undefined) return body;
+    if (typeof body !== "object") return redact(body);
+    const result = {};
+    for (const key of ["ok", "error_code"]) {
+      if (body[key] !== undefined) result[key] = body[key];
+    }
+    if (body.description !== undefined) result.description = redact(body.description);
+    if (body.parameters && typeof body.parameters === "object") {
+      const parameters = {};
+      for (const key of ["retry_after", "migrate_to_chat_id"]) {
+        if (body.parameters[key] !== undefined) parameters[key] = body.parameters[key];
+      }
+      if (Object.keys(parameters).length) result.parameters = parameters;
+    }
+    return result;
+  }
+
+  async function call(method, payload = {}) {
+    const methodName = String(method ?? "").trim();
+    if (!methodName) throw new TypeError("Telegram method is required");
+    const url = `https://api.telegram.org/bot${botToken}/${methodName}`;
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload && typeof payload === "object" ? payload : {})
+      });
+    } catch (cause) {
+      throw buildError(`Telegram API request failed: ${cause?.message || "network error"}`, {
+        status: 0
+      });
+    }
+
+    const httpOk = response.ok === undefined
+      ? Number(response.status) >= 200 && Number(response.status) < 300
+      : response.ok;
+    let body = null;
+    try {
+      body = await response.json();
+    } catch (cause) {
+      if (!httpOk) {
+        throw buildError(`Telegram API request failed with status ${response.status}`, {
+          status: response.status
+        });
+      }
+      throw buildError("Telegram API returned an invalid response", {
+        status: response.status
+      });
+    }
+
+    if (!httpOk) {
+      const description = redact(body?.description || `HTTP ${response.status}`);
+      throw buildError(`Telegram API request failed: ${description}`, {
+        status: response.status,
+        code: body?.error_code,
+        description,
+        response: safeResponse(body)
+      });
+    }
+    if (!body || body.ok !== true) {
+      const description = redact(body?.description || "Telegram API returned ok=false");
+      throw buildError(`Telegram API request failed: ${description}`, {
+        status: response.status,
+        code: body?.error_code,
+        description,
+        response: safeResponse(body)
+      });
+    }
+    return body.result;
+  }
+
+  function withDefined(base, extras) {
+    const payload = { ...base };
+    for (const [key, value] of Object.entries(extras || {})) {
+      if (value !== undefined) payload[key] = value;
+    }
+    return payload;
+  }
+
+  return {
+    call,
+    getMe: () => call("getMe"),
+    getChat: (chatId) => call("getChat", { chat_id: chatId }),
+    getChatMember: (chatId, userId) => call("getChatMember", { chat_id: chatId, user_id: userId }),
+    setWebhook: (url, secret) => call("setWebhook", withDefined({ url }, { secret_token: secret })),
+    sendMessage: (chatId, text, options = {}) => call("sendMessage", { chat_id: chatId, text, ...options }),
+    copyMessage: (target, source, messageId, options = {}) => call("copyMessage", {
+      chat_id: target,
+      from_chat_id: source,
+      message_id: messageId,
+      ...options
+    }),
+    createForumTopic: (chatId, name) => call("createForumTopic", { chat_id: chatId, name }),
+    answerCallbackQuery: (id, text, options = {}) => call("answerCallbackQuery", withDefined({ callback_query_id: id }, { text, ...options })),
+    editMessageText: (chatId, messageId, text, options = {}) => call("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...options
+    }),
+    deleteMessage: (chatId, messageId) => call("deleteMessage", { chat_id: chatId, message_id: messageId })
+  };
+}
+
+function configValue(config, names, fallback = undefined) {
+  for (const name of names) {
+    if (config && config[name] !== undefined && config[name] !== null) return config[name];
+  }
+  return fallback;
+}
+
+function runtimeTelegramConfig(config = {}) {
+  return {
+    groupId: configValue(config, ["groupId", "group_id", "TG_GROUP_ID"]),
+    appBaseUrl: String(configValue(config, ["appBaseUrl", "app_base_url", "APP_BASE_URL"], "")).replace(/\/$/, ""),
+    verificationTtlMinutes: configValue(config, ["verificationTtlMinutes", "verification_ttl_minutes", "VERIFICATION_TTL_MINUTES"], 30)
+  };
+}
+
+function sameId(left, right) {
+  return left !== null && left !== undefined && right !== null && right !== undefined
+    && String(left) === String(right);
+}
+
+function isForwardableTelegramMessage(message) {
+  if (!message) return false;
+  if (String(message.text || "").startsWith("/")) return false;
+  if (message.new_chat_members || message.left_chat_member || message.group_chat_created) return false;
+  return true;
+}
+
+function formatTelegramUserName(user = {}) {
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.username || `User ${user.user_id ?? user.id ?? ""}`;
+}
+
+function formatTelegramUserInfo(user = {}) {
+  const username = user.username ? `@${user.username}` : "无";
+  return [
+    "新用户验证通过",
+    `用户ID: ${user.id ?? user.user_id}`,
+    `昵称: ${formatTelegramUserName(user)}`,
+    `用户名: ${username}`,
+    `语言: ${user.language_code || "未知"}`
+  ].join("\n");
+}
+
+function verificationPromptKeyboard(url) {
+  return {
+    inline_keyboard: [[{ text: "打开验证页面", web_app: { url } }]]
+  };
+}
+
+function buildTopicAdminText(user = {}) {
+  return [
+    "用户管理",
+    `用户ID：${user.user_id}`,
+    `昵称：${formatTelegramUserName(user)}`,
+    `用户名：${user.username ? `@${user.username}` : "无"}`,
+    `当前状态：${user.is_blacklisted ? "已拉黑" : user.is_verified ? "已验证" : "待验证"}`,
+    `当前指纹：${user.latest_fingerprint_id || "无"}`
+  ].join("\n");
+}
+
+function topicAdminKeyboardForUser(user = {}) {
+  const userId = user.user_id;
+  const verifyData = user.is_verified ? `topicadmin:cancel:${userId}` : `topicadmin:approve:${userId}`;
+  const blacklistData = user.is_blacklisted ? `topicadmin:unban:${userId}` : `topicadmin:ban:${userId}`;
+  return {
+    inline_keyboard: [
+      [{ text: user.is_verified ? "取消验证" : "通过验证", callback_data: verifyData }],
+      [{ text: user.is_blacklisted ? "取消拉黑" : "拉黑", callback_data: blacklistData }],
+      [{ text: "获取用户名", callback_data: `topicadmin:username:${userId}` }],
+      [{ text: "标记指纹", callback_data: `topicadmin:markfp:${userId}` }],
+      [{ text: "屏蔽标签", callback_data: `topicadmin:blocklabels:1:${userId}` }],
+      [{ text: "指纹标签", callback_data: `topicadmin:labels:${userId}:1` }],
+      [{ text: "显示标签", callback_data: `topicadmin:labelnames:1:${userId}` }]
+    ]
+  };
+}
+
+function truncateTelegramText(value, maxLength = 24) {
+  const text = String(value || "");
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+function fingerprintLabelsText(user, pageData) {
+  const lines = [
+    "指纹标签",
+    `用户ID：${user.user_id}`,
+    `页码：${pageData.page}/${pageData.totalPages}`,
+    `总数：${pageData.total}`
+  ];
+  if (!pageData.items.length) {
+    lines.push("暂无标签");
+    return lines.join("\n");
+  }
+  lines.push("");
+  for (const item of pageData.items) {
+    const blocked = item.is_blocked ? " · 已屏蔽" : "";
+    lines.push(`#${item.id} ${item.label_name}${blocked} · ${item.fingerprint_id}${item.note ? ` · ${truncateTelegramText(item.note, 30)}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+function fingerprintLabelsKeyboard(userId, pageData) {
+  const rows = pageData.items.map((item) => ([{
+    text: `删除 #${item.id} ${truncateTelegramText(item.label_name, 10)}`,
+    callback_data: `topicadmin:dellabel:${userId}:${item.id}:${pageData.page}`
+  }]));
+  const nav = [];
+  if (pageData.page > 1) nav.push({ text: "上一页", callback_data: `topicadmin:labels:${userId}:${pageData.page - 1}` });
+  if (pageData.page < pageData.totalPages) nav.push({ text: "下一页", callback_data: `topicadmin:labels:${userId}:${pageData.page + 1}` });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: "关闭", callback_data: `topicadmin:closelabels:${userId}` }]);
+  return { inline_keyboard: rows };
+}
+
+function fingerprintLabelNamesText(pageData) {
+  const lines = ["标签名称", `页码：${pageData.page}/${pageData.totalPages}`, `总数：${pageData.total}`];
+  if (!pageData.items.length) {
+    lines.push("暂无标签");
+    return lines.join("\n");
+  }
+  lines.push("");
+  for (const item of pageData.items) lines.push(`${item.label_name} · ${item.total}${item.is_blocked ? " · 已屏蔽" : ""}`);
+  return lines.join("\n");
+}
+
+function fingerprintLabelNamesKeyboard(pageData, userId, options = {}) {
+  const rows = pageData.items.map((item) => ([{
+    text: `${item.is_blocked ? "✅ " : ""}${truncateTelegramText(item.label_name, 20)} (${item.total})`,
+    callback_data: options.blockMode
+      ? `tbl:${item.is_blocked ? "u" : "b"}:${pageData.page}:${userId}:${item.id}`
+      : `tld:${pageData.page}:${userId}:${item.id}`
+  }]));
+  const nav = [];
+  if (pageData.page > 1) nav.push({
+    text: "上一页",
+    callback_data: options.blockMode
+      ? `topicadmin:blocklabels:${pageData.page - 1}:${userId}`
+      : `topicadmin:labelnames:${pageData.page - 1}:${userId}`
+  });
+  if (pageData.page < pageData.totalPages) nav.push({
+    text: "下一页",
+    callback_data: options.blockMode
+      ? `topicadmin:blocklabels:${pageData.page + 1}:${userId}`
+      : `topicadmin:labelnames:${pageData.page + 1}:${userId}`
+  });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: "关闭", callback_data: `topicadmin:closelabels:${userId}` }]);
+  return { inline_keyboard: rows };
+}
+
+function uniqueFingerprintRows(rows = []) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = String(row.fingerprint_id ?? row.id ?? "");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function fingerprintFieldValues(meta = {}) {
+  const fields = [
+    ["public_ip", "公网 ip", meta.publicIpInfo?.ip],
+    ["public_asn", "公网 asn", meta.publicIpInfo?.asn],
+    ["public_isp", "公网 isp", meta.publicIpInfo?.organization],
+    ["webrtc_ip", "webrtc ip", meta.webrtcIpInfos?.[0]?.ip],
+    ["webrtc_asn", "webrtc asn", meta.webrtcIpInfos?.[0]?.asn],
+    ["webrtc_isp", "webrtc isp", meta.webrtcIpInfos?.[0]?.organization],
+    ["canvas", "canvas指纹", meta.details?.canvas],
+    ["webgl", "webgl指纹", meta.details?.webgl?.hash],
+    ["audio", "audio指纹", meta.details?.audio],
+    ["os", "系统", meta.details?.os],
+    ["cpu", "cpu", JSON.stringify(meta.details?.cpu || {})],
+    ["screen", "screen", JSON.stringify(meta.details?.screen || {})],
+    ["fonts", "fonts", (meta.details?.fonts || []).join(", ")]
+  ];
+  const seen = new Set();
+  return fields.filter(([key, , value]) => {
+    if (!value || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map(([key, label, value]) => ({ key, label, value }));
+}
+
+function fingerprintLabelDetailText(labelName, items = []) {
+  const lines = [
+    `标签详情：${labelName}`,
+    `屏蔽状态：${items.some((item) => item.is_blocked) ? "已屏蔽" : "未屏蔽"}`
+  ];
+  if (!items.length) {
+    lines.push("暂无记录");
+    return lines.join("\n");
+  }
+  for (const item of items) {
+    lines.push("", `指纹key：${item.fingerprint_id}`);
+    for (const field of fingerprintFieldValues(item.fingerprint_meta || {})) lines.push(`- ${field.label}：${field.value}`);
+  }
+  return lines.join("\n");
+}
+
+function parseFingerprintMarkInput(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const [labelPart, ...noteParts] = raw.split("|");
+  const label = labelPart.trim();
+  if (!label) return null;
+  return { label, note: noteParts.join("|").trim() };
+}
+
+function isExpiredIso(value) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+function isThreadNotFoundTelegramError(error) {
+  const description = error?.description || error?.response?.description || error?.response?.parameters?.description || error?.message;
+  return /message thread not found/i.test(String(description || ""));
+}
+
+function isAdminMember(member) {
+  return member?.status === "creator" || member?.status === "administrator";
+}
+
+/**
+ * Process one Telegram webhook update.  Every cross-request pending action is
+ * read from D1; no in-memory map is used, which keeps retries safe across
+ * stateless Worker instances.
+ */
+export async function processTelegramUpdate(update, { config = {}, store, telegram } = {}) {
+  if (!store || !telegram) throw new TypeError("store and telegram are required");
+  const runtime = runtimeTelegramConfig(config);
+  const groupId = runtime.groupId;
+
+  async function answerCallback(callback, text, options) {
+    if (!callback?.id || typeof telegram.answerCallbackQuery !== "function") return;
+    if (text === undefined && options === undefined) return telegram.answerCallbackQuery(callback.id);
+    if (options === undefined) return telegram.answerCallbackQuery(callback.id, text);
+    return telegram.answerCallbackQuery(callback.id, text, options);
+  }
+
+  async function safeDelete(chatId, messageId) {
+    if (chatId === undefined || messageId === undefined || typeof telegram.deleteMessage !== "function") return;
+    try { await telegram.deleteMessage(chatId, messageId); } catch {}
+  }
+
+  async function isGroupAdmin(userId) {
+    if (groupId === undefined || groupId === null || typeof telegram.getChatMember !== "function") return false;
+    try {
+      return isAdminMember(await telegram.getChatMember(groupId, userId));
+    } catch {
+      return false;
+    }
+  }
+
+  async function getUserForTopic(threadId) {
+    if (threadId === undefined || threadId === null || typeof store.getUserByThreadId !== "function") return null;
+    return store.getUserByThreadId(threadId);
+  }
+
+  async function createTopicForUser(userId, options = {}) {
+    let user = await store.getUser(userId);
+    if (!user) throw new Error("Telegram user was not found");
+    if (user.topic_thread_id && !options.forceNew) return user.topic_thread_id;
+    const name = user.username
+      ? `${user.first_name || "User"} (@${user.username})`
+      : `${user.first_name || "User"} (${user.user_id})`;
+    const topic = await telegram.createForumTopic(groupId, name.slice(0, 120));
+    const threadId = topic?.message_thread_id ?? topic?.messageThreadId;
+    if (threadId === undefined || threadId === null) throw new Error("Telegram did not return a forum topic id");
+    await telegram.sendMessage(groupId, formatTelegramUserInfo(user), { message_thread_id: threadId });
+    user = await store.setTopicThreadId(userId, threadId);
+    return user?.topic_thread_id ?? threadId;
+  }
+
+  async function forwardPrivateMessageToTopic(message, user) {
+    let threadId = user.topic_thread_id;
+    if (!threadId) threadId = await createTopicForUser(user.user_id);
+    try {
+      await telegram.copyMessage(groupId, message.chat.id, message.message_id, { message_thread_id: threadId });
+    } catch (error) {
+      if (!isThreadNotFoundTelegramError(error)) throw error;
+      threadId = await createTopicForUser(user.user_id, { forceNew: true });
+      await telegram.copyMessage(groupId, message.chat.id, message.message_id, { message_thread_id: threadId });
+    }
+  }
+
+  async function ensurePrivateState(from) {
+    const user = await store.upsertTelegramUser(from);
+    if (Number(user?.is_blacklisted)) return { user, status: "blacklisted" };
+    if (Number(user?.is_verified)) return { user, status: "verified" };
+    let session = typeof store.getLatestPendingSessionForUser === "function"
+      ? await store.getLatestPendingSessionForUser(user.user_id)
+      : null;
+    if (session && ((session.status && session.status !== "pending") || isExpiredIso(session.expires_at))) session = null;
+    if (!session) session = await store.createVerificationSession(user.user_id, runtime.verificationTtlMinutes);
+    const verificationUrl = `${runtime.appBaseUrl}/miniapp?startapp=${encodeURIComponent(session.session_id)}`;
+    return { user, status: "pending", verificationUrl };
+  }
+
+  async function sendVerificationPrompt(user, verificationUrl) {
+    if (user?.verification_prompt_chat_id !== null && user?.verification_prompt_chat_id !== undefined
+      && user?.verification_prompt_message_id !== null && user?.verification_prompt_message_id !== undefined) {
+      await safeDelete(user.verification_prompt_chat_id, user.verification_prompt_message_id);
+    }
+    const sent = await telegram.sendMessage(user.user_id, [
+      "请先完成验证后再开始聊天。",
+      "验证通过前，你发送的消息不会被转发。"
+    ].join("\n"), { reply_markup: verificationPromptKeyboard(verificationUrl) });
+    if (sent?.message_id !== undefined && typeof store.setVerificationPrompt === "function") {
+      await store.setVerificationPrompt(user.user_id, sent.chat?.id ?? user.user_id, sent.message_id);
+    }
+  }
+
+  async function handlePrivateMessage(message) {
+    if (!message?.from || message.chat?.type !== "private") return;
+    const text = String(message.text || "").trim();
+    const isStart = /^\/start(?:@[^\s]+)?(?:\s|$)/i.test(text);
+    if (!isStart && !isForwardableTelegramMessage(message)) return;
+    const result = await ensurePrivateState(message.from);
+    if (result.status === "blacklisted") {
+      await telegram.sendMessage(message.chat.id, "你已被加入黑名单，消息不会被转发。");
+      return;
+    }
+    if (result.status === "pending") {
+      await sendVerificationPrompt(result.user, result.verificationUrl);
+      return;
+    }
+    if (isStart) {
+      await telegram.sendMessage(message.chat.id, "已通过验证，直接发送消息即可。");
+      return;
+    }
+    await forwardPrivateMessageToTopic(message, result.user);
+  }
+
+  async function sendAdminReply(text, threadId, options = {}) {
+    return telegram.sendMessage(groupId, text, {
+      message_thread_id: threadId,
+      ...options
+    });
+  }
+
+  async function handleAdminCommand(message) {
+    if (!sameId(message?.chat?.id, groupId) || message?.message_thread_id === undefined) return false;
+    if (!/^\/admin(?:@[^\s]+)?(?:\s|$)/i.test(String(message.text || ""))) return false;
+    if (!(await isGroupAdmin(message.from?.id))) {
+      await sendAdminReply("你没有管理员权限。", message.message_thread_id);
+      return true;
+    }
+    const user = await getUserForTopic(message.message_thread_id);
+    if (!user) {
+      await sendAdminReply("当前话题没有绑定用户。", message.message_thread_id);
+      return true;
+    }
+    await sendAdminReply(buildTopicAdminText(user), message.message_thread_id, {
+      reply_markup: topicAdminKeyboardForUser(user)
+    });
+    return true;
+  }
+
+  async function handlePendingAdminInput(message) {
+    const threadId = message?.message_thread_id;
+    if (!sameId(message?.chat?.id, groupId) || threadId === undefined || !message?.from) return false;
+    if (message.from.is_bot) return false;
+    const pending = typeof store.getPendingAdminAction === "function"
+      ? await store.getPendingAdminAction(threadId, message.from.id)
+      : null;
+    const action = pending?.action;
+    const actionType = typeof action === "string" ? action : action?.type ?? action?.action;
+    if (!pending || actionType !== "markfp") return false;
+    if (!(await isGroupAdmin(message.from.id))) return true;
+    if (typeof store.deletePendingAdminAction === "function") await store.deletePendingAdminAction(threadId, message.from.id);
+    const parsed = parseFingerprintMarkInput(message.text);
+    if (!parsed) {
+      await sendAdminReply("标记失败，请使用 `标签|备注` 格式重新操作。", threadId, { parse_mode: "Markdown" });
+      return true;
+    }
+    const topicUser = await getUserForTopic(threadId);
+    if (!topicUser?.latest_fingerprint_meta?.id || (pending.user_id !== null && pending.user_id !== undefined
+      && !sameId(pending.user_id, topicUser.user_id))) {
+      await sendAdminReply("当前用户没有可标记的指纹。", threadId);
+      return true;
+    }
+    const isBlocked = Boolean(typeof action === "object" && action.isBlocked);
+    await store.createFingerprintLabel({
+      labelName: parsed.label,
+      note: parsed.note,
+      fingerprintMeta: topicUser.latest_fingerprint_meta,
+      sourceUserId: topicUser.user_id,
+      createdByUserId: message.from.id,
+      isBlocked
+    });
+    if (isBlocked && typeof store.setFingerprintLabelBlockedByName === "function") {
+      await store.setFingerprintLabelBlockedByName(parsed.label, true);
+    }
+    await sendAdminReply([
+      isBlocked ? "屏蔽指纹标签已保存" : "指纹标记已保存",
+      `标签：${parsed.label}`,
+      `指纹：${topicUser.latest_fingerprint_meta.id}`,
+      `屏蔽：${isBlocked ? "是" : "否"}`,
+      `备注：${parsed.note || "无"}`
+    ].join("\n"), threadId);
+    return true;
+  }
+
+  async function callbackContext(callback, userId = undefined) {
+    const message = callback?.message;
+    const threadId = message?.message_thread_id;
+    if (!sameId(message?.chat?.id, groupId) || threadId === undefined) {
+      await answerCallback(callback, "只能在群话题中使用");
+      return null;
+    }
+    if (!(await isGroupAdmin(callback.from?.id))) {
+      await answerCallback(callback, "无权限");
+      return null;
+    }
+    const topicUser = await getUserForTopic(threadId);
+    if (userId !== undefined && (!topicUser || !sameId(topicUser.user_id, userId))) {
+      await answerCallback(callback, "话题用户不匹配");
+      return null;
+    }
+    return { message, threadId, topicUser };
+  }
+
+  async function editCallbackMessage(message, text, replyMarkup) {
+    if (typeof telegram.editMessageText !== "function") return;
+    await telegram.editMessageText(groupId, message.message_id, text, { reply_markup: replyMarkup });
+  }
+
+  async function renderUserLabels(callback, topicUser, page) {
+    const pageData = await store.getFingerprintLabelsPageByUserId(topicUser.user_id, page, 7);
+    await editCallbackMessage(callback.message, fingerprintLabelsText(topicUser, pageData), fingerprintLabelsKeyboard(topicUser.user_id, pageData));
+  }
+
+  async function renderLabelNames(callback, page, userId, blockMode = false) {
+    const pageData = await store.getDistinctFingerprintLabelNamesPage(page, 7);
+    const prefix = blockMode ? ["选择要屏蔽的标签", "点击标签可切换屏蔽/取消屏蔽。", ""].join("\n") : "";
+    await editCallbackMessage(callback.message, `${prefix}${prefix ? "\n" : ""}${fingerprintLabelNamesText(pageData)}`,
+      fingerprintLabelNamesKeyboard(pageData, userId, { blockMode }));
+  }
+
+  async function handleCallback(callback) {
+    const data = String(callback?.data || "");
+    let match = /^topicadmin:(approve|cancel|ban|unban|username|markfp):(\d+)$/.exec(data);
+    if (match) {
+      const [, action, userIdRaw] = match;
+      const userId = Number(userIdRaw);
+      const context = await callbackContext(callback, userId);
+      if (!context) return;
+      const { message, threadId, topicUser } = context;
+      if (action === "username") {
+        await answerCallback(callback, `用户名：${topicUser.username ? `@${topicUser.username}` : "无"}`, { show_alert: true });
+        return;
+      }
+      if (action === "approve") {
+        await store.approveUser(userId);
+        await telegram.sendMessage(userId, "管理员已为你通过验证。你现在发送的消息会转发到原话题。");
+        await answerCallback(callback, "已通过验证");
+      } else if (action === "cancel") {
+        await store.cancelVerification(userId);
+        await telegram.sendMessage(userId, "管理员已取消你的验证状态。重新完成验证前，你发送的消息不会被转发。");
+        await answerCallback(callback, "已取消验证");
+      } else if (action === "ban") {
+        await store.blacklistUserDirect(userId);
+        await telegram.sendMessage(userId, "管理员已将你加入黑名单，后续消息不会被转发。");
+        await answerCallback(callback, "已拉黑");
+      } else if (action === "unban") {
+        await store.clearBlacklist(userId);
+        await telegram.sendMessage(userId, "管理员已取消你的拉黑状态。");
+        await answerCallback(callback, "已取消拉黑");
+      } else if (action === "markfp") {
+        if (!topicUser.latest_fingerprint_meta?.id) {
+          await answerCallback(callback, "当前用户还没有可标记的指纹", { show_alert: true });
+          return;
+        }
+        await store.upsertPendingAdminAction({
+          threadId,
+          adminId: callback.from.id,
+          userId,
+          action: { type: "markfp", isBlocked: false },
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+        });
+        await answerCallback(callback, "请发送：标签|备注");
+        await safeDelete(groupId, message.message_id);
+        await sendAdminReply("请在当前话题发送 `标签|备注` 来标记该用户当前指纹。备注可留空。", threadId, { parse_mode: "Markdown" });
+        return;
+      }
+      await safeDelete(groupId, message.message_id);
+      return;
+    }
+
+    match = /^topicadmin:labels:(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[1]));
+      if (!context) return;
+      await renderUserLabels(callback, context.topicUser, Number(match[2]));
+      await answerCallback(callback);
+      return;
+    }
+    match = /^topicadmin:dellabel:(\d+):(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[1]));
+      if (!context) return;
+      await store.deleteFingerprintLabelById(Number(match[2]));
+      await renderUserLabels(callback, context.topicUser, Number(match[3]));
+      await answerCallback(callback, "已删除标签");
+      return;
+    }
+    match = /^topicadmin:closelabels:(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[1]));
+      if (!context) return;
+      await safeDelete(groupId, callback.message.message_id);
+      await answerCallback(callback);
+      return;
+    }
+    match = /^topicadmin:labelnames:(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[2]));
+      if (!context) return;
+      await renderLabelNames(callback, Number(match[1]), Number(match[2]), false);
+      await answerCallback(callback);
+      return;
+    }
+    match = /^topicadmin:blocklabels:(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[2]));
+      if (!context) return;
+      await renderLabelNames(callback, Number(match[1]), Number(match[2]), true);
+      await answerCallback(callback);
+      return;
+    }
+    match = /^tld:(\d+):(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[2]));
+      if (!context) return;
+      const label = await store.getFingerprintLabelById(Number(match[3]));
+      if (!label) {
+        await answerCallback(callback, "标签不存在", { show_alert: true });
+        return;
+      }
+      const items = uniqueFingerprintRows(await store.getFingerprintLabelsByName(label.label_name));
+      const blocked = items.some((item) => item.is_blocked);
+      await editCallbackMessage(callback.message, fingerprintLabelDetailText(label.label_name, items), {
+        inline_keyboard: [
+          [{ text: blocked ? "取消屏蔽标签" : "屏蔽标签", callback_data: `tlb:${blocked ? "u" : "b"}:${match[1]}:${match[2]}:${label.id}` }],
+          [{ text: "返回标签名称", callback_data: `topicadmin:labelnames:${match[1]}:${match[2]}` }],
+          [{ text: "关闭", callback_data: `topicadmin:closelabels:${match[2]}` }]
+        ]
+      });
+      await answerCallback(callback);
+      return;
+    }
+    match = /^tlb:([bu]):(\d+):(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[3]));
+      if (!context) return;
+      const label = await store.getFingerprintLabelById(Number(match[4]));
+      if (!label) {
+        await answerCallback(callback, "标签不存在", { show_alert: true });
+        return;
+      }
+      const blocked = match[1] === "b";
+      await store.setFingerprintLabelBlockedByName(label.label_name, blocked);
+      const items = uniqueFingerprintRows(await store.getFingerprintLabelsByName(label.label_name));
+      await editCallbackMessage(callback.message, fingerprintLabelDetailText(label.label_name, items), {
+        inline_keyboard: [
+          [{ text: blocked ? "取消屏蔽标签" : "屏蔽标签", callback_data: `tlb:${blocked ? "u" : "b"}:${match[2]}:${match[3]}:${label.id}` }],
+          [{ text: "返回标签名称", callback_data: `topicadmin:labelnames:${match[2]}:${match[3]}` }],
+          [{ text: "关闭", callback_data: `topicadmin:closelabels:${match[3]}` }]
+        ]
+      });
+      await answerCallback(callback, blocked ? "已屏蔽标签" : "已取消屏蔽标签");
+      return;
+    }
+    match = /^tbl:([bu]):(\d+):(\d+):(\d+)$/.exec(data);
+    if (match) {
+      const context = await callbackContext(callback, Number(match[3]));
+      if (!context) return;
+      const label = await store.getFingerprintLabelById(Number(match[4]));
+      if (!label) {
+        await answerCallback(callback, "标签不存在", { show_alert: true });
+        return;
+      }
+      const blocked = match[1] === "b";
+      await store.setFingerprintLabelBlockedByName(label.label_name, blocked);
+      await renderLabelNames(callback, Number(match[2]), Number(match[3]), true);
+      await answerCallback(callback, blocked ? "已屏蔽标签" : "已取消屏蔽标签");
+    }
+  }
+
+  if (update?.callback_query) {
+    await handleCallback(update.callback_query);
+    return;
+  }
+  const message = update?.message;
+  if (!message) return;
+  if (message.chat?.type === "private") {
+    await handlePrivateMessage(message);
+    return;
+  }
+  if (!sameId(message.chat?.id, groupId)) return;
+  if (await handleAdminCommand(message)) return;
+  if (await handlePendingAdminInput(message)) return;
+  if (!message.message_thread_id || !isForwardableTelegramMessage(message) || message.from?.is_bot) return;
+  const user = await getUserForTopic(message.message_thread_id);
+  if (!user || Number(user.is_blacklisted)) return;
+  await telegram.copyMessage(user.user_id, groupId, message.message_id);
+}
+
 // Task 2 deliberately keeps the production entrypoint inert; later tasks wire
 // this fetch function to the Telegram/web verification router.
 async function handleRequest() {
