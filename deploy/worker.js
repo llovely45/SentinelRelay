@@ -1093,12 +1093,10 @@ function renderVerificationPageHtml({
       body { margin:0; min-height:100vh; padding:20px; display:grid; place-items:center; color:var(--ink); background:radial-gradient(circle at top left,#ffe5c8 0,transparent 32%),radial-gradient(circle at bottom right,#ffd7b5 0,transparent 28%),var(--bg); font-family:"Segoe UI","PingFang SC",sans-serif; }
       .card { width:min(100%,460px); padding:28px; border:1px solid var(--line); border-radius:24px; background:rgba(255,249,240,.94); box-shadow:0 22px 70px rgba(76,44,19,.12); }
       h1 { margin:0 0 10px; font-size:28px; } p { margin:0 0 16px; line-height:1.6; }
-      .privacy-notice { margin:0 0 18px; padding:13px 14px; border:1px solid #e8c59f; border-radius:14px; background:#fff2dd; color:#6d421d; font-size:13px; line-height:1.6; }
-      .privacy-notice strong { display:block; margin-bottom:4px; color:#4f2c13; }
       .error { margin-bottom:16px; padding:12px 14px; border:1px solid #f2c1af; border-radius:14px; background:#fff0eb; color:#a13d17; }
       .status { margin-top:12px; color:#7b4b25; font-size:13px; line-height:1.5; }
       button { width:100%; margin-top:18px; padding:14px 18px; border:0; border-radius:999px; background:linear-gradient(135deg,var(--accent),#9f4719); color:#fff; font-size:16px; cursor:pointer; }
-      button:disabled { opacity:.5; cursor:not-allowed; } .footer { margin-top:14px; opacity:.8; font-size:13px; } .hidden { display:none; }
+      button:disabled { opacity:.5; cursor:not-allowed; } .hidden { display:none; }
     </style>
     <script>
       window.onTurnstileSuccess = function () {
@@ -1125,10 +1123,6 @@ function renderVerificationPageHtml({
     <main class="card">
       <h1>继续聊天前需要验证</h1>
       <p>此页面使用 Cloudflare Turnstile 进行人机验证。验证通过后，机器人会为你建立独立话题并转发后续消息。</p>
-      <div class="privacy-notice" role="note">
-        <strong>隐私与指纹说明</strong>
-        页面会尝试采集浏览器信号（Canvas、WebGL、Audio、系统、CPU、屏幕、字体和 WebRTC 公网地址），仅用于反滥用和指纹标签匹配。浏览器可以阻止任意信号；所有字段均可为空。你可以拒绝继续验证。
-      </div>
       ${safeError ? `<div class="error">${safeError}</div>` : ""}
       <form method="post" action="${safeAction}" id="verification_form">
         <input type="hidden" name="session_id" id="session_id" value="${safeSession}" />
@@ -1139,7 +1133,6 @@ function renderVerificationPageHtml({
         <button type="submit" id="verify_button" disabled>等待 Cloudflare 验证</button>
       </form>
       <div class="error hidden" id="session_error">缺少验证会话，请回到 Telegram 重新打开验证入口。</div>
-      <div class="footer">信号采集失败不会阻止验证；如果验证失败，本次会话可能会被加入黑名单。</div>
     </main>
     <script>
       (function collectSignals() {
