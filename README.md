@@ -1,39 +1,52 @@
 # SentinelRelay 哨兵中继
 
-SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信中继项目。
-它把 Telegram 用户、验证流程和管理群组连接起来，让私信能够在独立话题中进行隔离、审查与双向转发。
+SentinelRelay 是一个基于 Cloudflare Workers 的 Telegram 安全双向私信中继 Worker。
+它将 Telegram 用户、验证流程和管理群组连接起来，让每个用户在独立的 Forum 话题中进行隔离通信与双向转发。
 
-## 核心能力
+## Worker 能力
 
-- 通过 Telegram Bot 接收和处理用户私信。
-- 为每个用户建立独立的 Forum 话题，隔离不同会话。
-- 支持用户验证、会话过期、黑名单和重复请求防护。
-- 使用 Cloudflare D1 持久化用户、验证会话、话题和运行状态。
-- 通过 Telegram Webhook 在用户与管理群组之间双向转发消息。
-- 支持设备指纹记录与标签化风控管理。
-- 提供浏览器部署向导，生成可直接部署的单文件 Worker。
+- 接收 Telegram Bot Webhook，并校验请求密钥。
+- 为通过验证的用户创建独立 Forum 话题。
+- 在用户私信与管理群组话题之间双向转发消息。
+- 使用 Cloudflare Turnstile 处理浏览器验证和验证会话。
+- 处理验证会话过期、重复提交、黑名单和并发请求。
+- 记录设备指纹并支持管理群组中的指纹标签与屏蔽操作。
+- 通过 D1 保存用户、话题、验证会话、运行设置和 Telegram 更新处理状态。
 
-## 运行架构
+## 请求入口
+
+| 路径 | 作用 |
+| --- | --- |
+| `GET /` | Worker 运行状态响应。 |
+| `GET /health` | 初始化 D1 表结构并检查 Webhook 状态。 |
+| `POST /telegram/webhook` | 接收 Telegram 更新并执行消息路由。 |
+| `GET /verify/:session` | 展示普通浏览器验证页。 |
+| `GET /miniapp` | 展示 Telegram Mini App 验证页。 |
+| `POST /api/verify/:session` | 提交普通验证结果。 |
+| `POST /api/verify` | 提交 Mini App 验证结果。 |
+
+## 运行流程
 
 ```text
 Telegram 用户
       │
       ▼
-Cloudflare Worker ─── Cloudflare D1
+Worker 验证与会话管理 ─── Cloudflare D1
       │
       ▼
-Telegram 管理群组（Forum 话题）
+Telegram 管理群组（每个用户一个 Forum 话题）
 ```
 
-Worker 负责 Webhook、验证、消息路由和权限处理；D1 负责保存运行所需的持久化状态；管理群组中的每个 Forum 话题对应一个用户会话。
+Worker 负责 Telegram API 调用、验证、消息转发和管理操作；D1 负责保存跨请求状态；Telegram Forum 话题负责承载管理侧的独立会话。
 
-## 项目目录
+## 持久化数据
 
-- `deploy/index.html`：静态部署向导页面。
-- `deploy/worker.js`：Cloudflare Worker 单文件模板和运行逻辑。
-- `deploy/generator.js`：在浏览器中替换 Worker 配置占位符并生成代码。
-- `deploy/gate.js`：部署向导的本地验证流程。
-- `deploy/README.md`：Cloudflare Pages、Workers 和 D1 的部署教程。
+- `users`：Telegram 用户、验证状态、话题和最近指纹。
+- `verification_sessions`：一次性验证会话及过期状态。
+- `fingerprint_labels`：设备指纹标签和屏蔽规则。
+- `pending_admin_actions`：管理群组中的待确认操作。
+- `runtime_settings`：Webhook 等运行时设置。
+- `processed_telegram_updates`：Telegram 更新去重与处理租约。
 
 ## 技术栈
 
