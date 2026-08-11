@@ -20,7 +20,7 @@ const QUOTED_MARKER_RE = /(["'])__(TG_BOT_TOKEN|TG_GROUP_ID|APP_BASE_URL|TURNSTI
 export const CONFIG_ERRORS = Object.freeze({
   TG_BOT_TOKEN: "TG_BOT_TOKEN 格式或长度无效",
   TG_GROUP_ID: "TG_GROUP_ID 必须是数字",
-  APP_BASE_URL: "APP_BASE_URL 必须使用 HTTPS 且不能带末尾斜杠",
+  APP_BASE_URL: "APP_BASE_URL 必须使用自定义 HTTPS 域名，不能使用 workers.dev 或末尾斜杠",
   TURNSTILE_SITE_KEY: "TURNSTILE_SITE_KEY 不能为空",
   TURNSTILE_SECRET_KEY: "TURNSTILE_SECRET_KEY 不能为空",
   TG_WEBHOOK_SECRET: "TG_WEBHOOK_SECRET 至少需要 16 个字符",
@@ -45,8 +45,10 @@ function isHttpsUrlWithoutTrailingSlash(value) {
   }
   try {
     const url = new URL(value);
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (hostname === "workers.dev" || hostname.endsWith(".workers.dev")) return false;
     return url.protocol === "https:"
-      && Boolean(url.hostname)
+      && Boolean(hostname)
       && !url.username
       && !url.password
       && url.pathname === "/"

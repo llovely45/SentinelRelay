@@ -82,6 +82,7 @@
     .field-check:hover:not(:disabled) { background: rgba(88, 166, 255, .12); }
     .field-help { display: block; margin: 7px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.45; }
     .field-error { min-height: 1.35em; margin: 4px 0 0; color: var(--danger); font-size: .82rem; }
+    .field input[data-valid="true"] { border-color: var(--success); box-shadow: 0 0 0 3px rgba(84, 210, 138, .14); }
     .field input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(255, 139, 139, .12); }
 
     input, textarea, button {
@@ -196,7 +197,7 @@
             <input id="APP_BASE_URL" name="APP_BASE_URL" type="url" autocomplete="url" required placeholder="https://relay.example.com" aria-describedby="APP_BASE_URL-help APP_BASE_URL-error">
             <button class="field-check" type="button" data-validate-field="APP_BASE_URL">检查可达</button>
           </div>
-          <small id="APP_BASE_URL-help" class="field-help">先在 Cloudflare Workers 创建默认项目并绑定 D1（绑定名必须是 DB），部署默认 Worker 后复制它的公开 HTTPS 根地址。这里只填 origin，例如 https://relay.example.com，不要加路径、查询参数或末尾斜杠；点击“检查可达”会从当前浏览器请求 Worker 根路径。</small>
+          <small id="APP_BASE_URL-help" class="field-help">先在 Cloudflare Workers 创建默认项目并绑定 D1（绑定名必须是 DB），再绑定你自己的 HTTPS 域名；禁止使用 *.workers.dev 默认域名。这里只填 origin，例如 https://relay.example.com，不要加路径、查询参数或末尾斜杠；点击“检查可达”会从当前浏览器请求 Worker 根路径。</small>
           <div id="APP_BASE_URL-error" class="field-error" role="alert" aria-live="polite"></div>
         </div>
 
@@ -432,7 +433,11 @@
     function renderFieldError(name, message = "") {
       const input = fieldInput(name);
       const error = document.getElementById(`${name}-error`);
-      if (input) input.setAttribute("aria-invalid", message ? "true" : "false");
+      if (input) {
+        const hasError = Boolean(message);
+        input.setAttribute("aria-invalid", hasError ? "true" : "false");
+        input.setAttribute("data-valid", hasError ? "false" : "true");
+      }
       if (error) error.textContent = message;
     }
 

@@ -29,7 +29,7 @@ python3 -m http.server 8000
 
 ## 2. 准备配置
 
-- 在 Cloudflare Workers 创建默认项目，创建 D1 并绑定为 `DB`，部署默认代码后把 Worker HTTPS 根地址填在页面第一项，点击“检查可达”。生成代码后把默认代码替换掉并重新部署。
+- 在 Cloudflare Workers 创建默认项目，创建 D1 并绑定为 `DB`，为 Worker 绑定自定义 HTTPS 域名（禁止使用 `*.workers.dev` 默认域名），再把地址填在页面第一项并点击“检查可达”。生成代码后把默认代码替换掉并重新部署。
 - 创建 Telegram Bot，并把 Bot Token 填入页面。
 - 创建一个开启 **Topics/Forum** 的超级群，把 Bot 加入群组，并授予读取消息、发送消息、管理话题和删除消息等所需权限。填入群组 ID（通常是负数），页面会用 `getMe` 和 `getChat` 直接验证。
 - 在 Cloudflare Turnstile 创建站点，添加 Worker 的 HTTPS 域名（本地调试可按 Turnstile 控制台允许的测试域名配置），填入 Site Key 和 Secret Key。

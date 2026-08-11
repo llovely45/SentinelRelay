@@ -50,7 +50,7 @@ Pages 部署完成后仍需按照下面的 Worker 教程，把生成代码单独
 | --- | --- |
 | `TG_BOT_TOKEN` | Telegram Bot Token；部署页会调用 `getMe` 验证。 |
 | `TG_GROUP_ID` | 开启 Topics/Forum 的 Telegram 超级群 ID（通常为负数）；部署页会验证群类型和权限。 |
-| `APP_BASE_URL` | Worker 的公开 HTTPS 基础地址，不带末尾 `/`；向导首先从浏览器请求根路径检查可达性，再用于验证链接和 Webhook 地址。 |
+| `APP_BASE_URL` | Worker 的自定义 HTTPS 基础地址，不带末尾 `/`；禁止 `*.workers.dev` 默认域名，向导首先从浏览器请求根路径检查可达性。 |
 | `TURNSTILE_SITE_KEY` | Cloudflare Turnstile 的公开 Site Key，显示在验证页。 |
 | `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile 服务端 Secret，用于验证提交结果。 |
 | `TG_WEBHOOK_SECRET` | Telegram Webhook Header 密钥，至少 16 个字符；Worker 会拒绝缺失或不匹配的 Header。 |
