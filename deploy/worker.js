@@ -142,6 +142,18 @@ CREATE INDEX IF NOT EXISTS idx_processed_telegram_updates_expiry
   ON processed_telegram_updates(status, lease_expires_at);
 `;
 
+/**
+ * D1's Worker-side exec parser is stricter than the dashboard SQL endpoint
+ * about formatted multiline batches. Compact the idempotent schema before
+ * passing it to exec while preserving statement separators and SQL tokens.
+ */
+export function compactSchemaSql(sql) {
+  if (typeof sql !== "string") throw new TypeError("Schema SQL must be a string");
+  return sql.replace(/\s+/g, " ").trim();
+}
+
+const COMPACT_SCHEMA_SQL = compactSchemaSql(SCHEMA_SQL);
+
 function normalizeString(value) {
   if (value === null || value === undefined) return "";
   return String(value).trim();
@@ -1279,7 +1291,7 @@ export function createStore(db) {
 
   async function ensureSchema() {
     if (typeof db.exec !== "function") throw new TypeError("D1 binding must expose exec()");
-    return db.exec(SCHEMA_SQL);
+    return db.exec(COMPACT_SCHEMA_SQL);
   }
 
   async function getUser(userId) {
